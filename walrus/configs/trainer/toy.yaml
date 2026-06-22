@@ -1,0 +1,32 @@
+_target_: walrus.trainer.Trainer
+max_epoch: 5
+val_frequency: 5
+rollout_val_frequency: 10
+short_validation_length: 5
+max_rollout_steps: 20
+num_time_intervals: 3
+enable_amp: False
+loss_fn:
+  _target_: the_well.benchmark.metrics.MAE
+formatter:
+  _target_: hydra.utils.get_class
+  path: walrus.data.well_to_multi_transformer.ChannelsFirstWithTimeFormatter
+revin:
+  _target_: walrus.trainer.normalization_strat.SamplewiseRevNormalization
+  _partial_: True
+prediction_type: delta
+grad_acc_steps: 1
+image_validation: False
+video_validation: False
+gradient_log_level: 0
+clip_gradient: 5.0
+log_interval: 5
+loss_multiplier: 100.
+lr_scheduler_per_step: False
+validation_suite:
+  - _target_: the_well.benchmark.metrics.VRMSE
+batch_aggregation_fns:
+  - torch.mean
+  - torch.median
+
+
