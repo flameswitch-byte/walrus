@@ -11,6 +11,12 @@ base_kernel_size3d:
   - [8, 4]
   - [8, 4] # Assume this is for all dimensions unless a tuple is passed
 groups: 12
+# Upsampling op: "transpose" (default, ConvTranspose) or "resize_conv"
+# (interpolate + normal conv; anti-checkerboard, NOT weight-compatible).
+upsample_mode: transpose
+# resize_conv only: refinement-conv kernel (interpolation does the upsampling, so a
+# small kernel suffices and is far cheaper than the base kernel). 0/null -> base.
+resize_conv_kernel: 3
 activation:
   _partial_: true
   _target_: torch.nn.SiLU

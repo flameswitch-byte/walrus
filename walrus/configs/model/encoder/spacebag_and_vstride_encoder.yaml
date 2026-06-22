@@ -18,6 +18,9 @@ kernel_scales_seq:
   - [8, 4]
 variable_downsample: true
 variable_deterministic_ds: true
+# Deterministic anti-aliasing (BlurPool) before each strided conv. Default off
+# keeps the baseline identical; override to true to enable.
+anti_aliased_stride: false
 activation:
   _partial_: true
   _target_: torch.nn.SiLU

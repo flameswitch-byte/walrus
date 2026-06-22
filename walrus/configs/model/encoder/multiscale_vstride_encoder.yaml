@@ -1,0 +1,37 @@
+_partial_: true
+_target_: walrus.models.encoders.multiscale_vstride_encoder.MultiScaleSpaceBagVstrideEncoder
+learned_pad: true
+base_kernel_size1d:
+  - [4, 4]
+base_kernel_size2d:
+  - [8, 4]
+  - [8, 4]
+base_kernel_size3d:
+  - [8, 4]
+  - [8, 4]
+  - [8, 4] # Assume this is for all dimensions unless a tuple is passed
+groups: 12
+kernel_scales_seq:
+  - [2, 2]
+  - [4, 2]
+  - [4, 4]
+  - [8, 4]
+variable_downsample: true
+variable_deterministic_ds: true
+# Deterministic anti-aliasing (BlurPool) before each strided conv. Default off
+# keeps the baseline identical; override to true to enable.
+anti_aliased_stride: false
+# B5 multi-scale tokenizer. Each layer runs the medium (base, = the pretrained proj
+# weights, full width) path alongside coarse paths that conservatively average-pool
+# the input (finite-volume restriction) then apply a narrow base-kernel conv on the
+# coarsened grid -> reach = pool * base px (e.g. pool 2 -> 16px "8x8 view, truly
+# 16x16") at 1/4 the kernel volume of a dense 16x16 conv, anti-aliased by the pool.
+# The 1x1 mix starts identity-on-medium / zero-on-coarse -> bit-exact to the spacebag
+# baseline at init. The fine (sub-base) path was dropped (information-redundant).
+# Coarse does NOT chase global structure (that's the processor's job).
+multiscale_layers: [1, 2]      # which layers get the multi-scale fork (1, 2, or both)
+multiscale_extra_div: 4        # each coarse path width = layer_width // this
+multiscale_coarse_pools: [2]   # one coarse path per pool factor; [2]->16px, [2,4]->16&32
+activation:
+  _partial_: true
+  _target_: torch.nn.SiLU

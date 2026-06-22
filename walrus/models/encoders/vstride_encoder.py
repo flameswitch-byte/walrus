@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from walrus.models.shared_utils.blurpool import BlurPoolDynamic
+
 CONV_FUNCS = {
     1: (nn.Conv1d, F.conv1d),
     2: (nn.Conv2d, F.conv2d),
@@ -177,6 +179,7 @@ class AdaptiveDVstrideEncoder(nn.Module):
         norm_layer: Callable = nn.GroupNorm,
         activation: Callable = nn.GELU,
         extra_dims: Optional[int] = 3,
+        anti_aliased_stride: bool = False,
     ) -> None:
         super().__init__()
 
@@ -192,6 +195,11 @@ class AdaptiveDVstrideEncoder(nn.Module):
         self.variable_downsample = variable_downsample
         self.kernel_scales_seq = kernel_scales_seq
         self.variable_deterministic_ds = variable_deterministic_ds
+        # Optional deterministic anti-aliasing before each strided conv (BlurPool).
+        self.anti_aliased_stride = anti_aliased_stride
+        self.blurpool = (
+            BlurPoolDynamic(spatial_dims=spatial_dims) if anti_aliased_stride else None
+        )
 
         conv_class, self.conv_func = CONV_FUNCS[spatial_dims]
 
@@ -246,6 +254,10 @@ class AdaptiveDVstrideEncoder(nn.Module):
                 weight = weight.sum(dim=-i, keepdim=True)
                 stride[-i] = 1
                 padding[-i] = 0
+        # Low-pass before the strided subsample to suppress aliasing. Uses the
+        # singleton-adjusted stride, so blurpool skips inflated/size-1 axes.
+        if self.anti_aliased_stride:
+            x = self.blurpool(x, stride)
         out = self.conv_func(x, weight, bias, tuple(stride), tuple(padding))
         return out
 
