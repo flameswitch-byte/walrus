@@ -70,6 +70,7 @@ class IsotropicModel(nn.Module):
             int
         ] = 0,  # Temporary due to FSDP resume issue
         dim_key_override: Optional[int] = None,  # Temporary due to FSDP resume issue
+        per_axis_tokens: Optional[int] = None,  # resolution lever for deterministic ds
         norm_layer: Callable = RMSGroupNorm,
         *args,
         **kwargs,
@@ -83,6 +84,7 @@ class IsotropicModel(nn.Module):
         self.gradient_checkpointing_freq = gradient_checkpointing_freq
         self.override_dimensionality = override_dimensionality
         self.dim_key_override = dim_key_override
+        self.per_axis_tokens = per_axis_tokens
         self.encoder_dummy = nn.Parameter(
             torch.ones(1)
         )  # for grad checkpointing, see: https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11
@@ -243,7 +245,11 @@ class IsotropicModel(nn.Module):
         )
         if hasattr(self, "ape"):
             x = x + self.ape
-        return x, stage_info, jitter_info
+        # Two-grid encoders (Design B) stash a persistent coarse token grid + the
+        # fine/coarse size ratio in stage_info; pull them out as explicit returns so
+        # they thread cleanly through the block loop (and grad checkpointing).
+        coarse = stage_info.pop("coarse", None) if isinstance(stage_info, dict) else None
+        return x, coarse, stage_info, jitter_info
 
     def _decoder_forward(self, x, state_labels, bcs, stage_info, jitter_info, metadata):
         """Run the decoder and invert the jitter"""
@@ -312,7 +318,15 @@ class IsotropicModel(nn.Module):
             and self.embed[dim_key].variable_deterministic_ds
         ):
             # support for variable but deterministic downsampling
-            dynamic_ks = choose_kernel_size_deterministic(x_shape)
+            _enc = self.embed[dim_key]
+            _bk = (
+                (_enc.base_kernel1, _enc.base_kernel2)
+                if hasattr(_enc, "base_kernel1") and hasattr(_enc, "base_kernel2")
+                else None
+            )
+            dynamic_ks = choose_kernel_size_deterministic(
+                x_shape, per_axis_tokens=self.per_axis_tokens, base_kernel=_bk
+            )
             patch_size = [reduce(mul, k) for k in dynamic_ks]
             # patch_size doesn't matter for the dimension that is higher than the number of spatial dims
             patch_size.extend([0] * (self.max_d - len(patch_size)))
@@ -336,7 +350,7 @@ class IsotropicModel(nn.Module):
             patch_size = [self.embed[dim_key].patch_size] * self.max_d
         # Always assume we need to checkpoint the encoder if any checkpointing is on
         if self.gradient_checkpointing_freq > 0:
-            x, stage_info, jitter_info = torch.utils.checkpoint.checkpoint(
+            x, coarse, stage_info, jitter_info = torch.utils.checkpoint.checkpoint(
                 self._encoder_forward,
                 x,
                 state_labels,
@@ -348,7 +362,7 @@ class IsotropicModel(nn.Module):
                 use_reentrant=False,
             )
         else:
-            x, stage_info, jitter_info = self._encoder_forward(
+            x, coarse, stage_info, jitter_info = self._encoder_forward(
                 x,
                 state_labels,
                 bcs,
@@ -357,6 +371,9 @@ class IsotropicModel(nn.Module):
                 dynamic_ks,
                 self.encoder_dummy,
             )
+        coarse_ratio = (
+            stage_info.get("coarse_ratio") if isinstance(stage_info, dict) else None
+        )
 
         # Process
         all_att_maps = []
@@ -371,21 +388,44 @@ class IsotropicModel(nn.Module):
         for ii, blk in enumerate(self.blocks):
             # Randomly roll dimensions of x corresponding to periodic BCs
             if len(periodic_dims) > 0 and self.jitter_patches:
-                roll_quantities = [
-                    np.random.randint(0, periodic_dim_shapes[dim])
-                    for dim in range(len(periodic_dims))
-                ]
+                if coarse is None:
+                    # Single-grid: arbitrary roll on the fine grid.
+                    roll_quantities = [
+                        np.random.randint(0, periodic_dim_shapes[dim])
+                        for dim in range(len(periodic_dims))
+                    ]
+                    coarse_rolls = None
+                else:
+                    # Two-grid: keep fine<->coarse registration. Roll the fine grid by a
+                    # MULTIPLE of coarse_ratio and the coarse grid by roll//ratio so
+                    # parent(fine_i)=fine_i//ratio survives the roll. Axes whose fine
+                    # size isn't divisible by ratio are left unrolled (safe).
+                    roll_quantities = []
+                    coarse_rolls = []
+                    for dim in range(len(periodic_dims)):
+                        fdim = periodic_dim_shapes[dim]
+                        if coarse_ratio and fdim % coarse_ratio == 0 and fdim // coarse_ratio > 0:
+                            k = np.random.randint(0, fdim // coarse_ratio)
+                            roll_quantities.append(k * coarse_ratio)
+                            coarse_rolls.append(k)
+                        else:
+                            roll_quantities.append(0)
+                            coarse_rolls.append(0)
                 roll_total = [
                     roll_quantities[dim] + r for dim, r in enumerate(roll_total)
                 ]
-                x = torch.roll(
-                    x,
-                    shifts=roll_quantities,
-                    dims=periodic_dims,
+                x = torch.roll(x, shifts=roll_quantities, dims=periodic_dims)
+                if coarse is not None:
+                    coarse = torch.roll(coarse, shifts=coarse_rolls, dims=periodic_dims)
+            if coarse is not None:
+                x, coarse, att_maps = blk(
+                    x, bcs, coarse=coarse, coarse_ratio=coarse_ratio,
+                    return_att=return_att,
                 )
-            x, att_maps = blk(x, bcs, return_att=return_att)
+            else:
+                x, att_maps = blk(x, bcs, return_att=return_att)
             all_att_maps += att_maps
-        # If we randomly rolled, we need to roll back
+        # If we randomly rolled, we need to roll back (fine only; coarse is not decoded)
         if sum(roll_total) > 0 and self.jitter_patches:
             x = torch.roll(
                 x,

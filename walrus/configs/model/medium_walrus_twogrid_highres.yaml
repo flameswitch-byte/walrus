@@ -1,0 +1,57 @@
+defaults:
+  - encoder: twogrid_vstride_encoder    # single encoder yaml; high-res diffs overridden below
+  - decoder: vstride_decoder            # single decoder yaml; base_kernel mirrored below
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+_target_: walrus.models.IsotropicModel
+hidden_dim: 256
+projection_dim: 96
+intermediate_dim: 96
+processor_blocks: 6
+drop_path: 0.05
+groups: 8
+max_d: 3
+causal_in_time: False
+include_d: [2, 3]
+override_dimensionality: 3
+jitter_patches: True
+gradient_checkpointing_freq: 0
+input_field_drop: 0.0
+# Resolution lever: 64 tok/axis (vs default 32). Requires every input axis to satisfy
+# axis % 64 == 0 AND axis//64 in patch_dict {0,1,2,4,8,12,16,24,32}; for true 3D this
+# is aggressive (64^3 tokens) -> intended for 2D / thin-3D data here.
+per_axis_tokens: 64
+# High-res ENCODER overrides. Kernel [4,4] (layer1=4, layer2=4), NOT [8,4] or [4,2]:
+# at per_axis_tokens=64 the strides shrink to ~2-4, so [4,4] is the smallest kernel that
+# (a) is >= the largest stride patch_dict yields here (helmholtz 1024 -> patch16=(4,4),
+# stride 4) so every axis still reaches 64 tokens (no doubling), and (b) keeps kernel ~=
+# stride -> tight, fine-detail tokens with minimal overlap (vs [8,4]'s 4x layer-1 overlap
+# at stride 2 = blurry/redundant). [4,2] under-reaches (layer2=2 can't do stride-4 ->
+# helmholtz stuck at 128 tokens). Coarser ratios suit the bigger fine grid (powers of two
+# keep the periodic-roll guard Hf%ratio==0).
+encoder:
+  base_kernel_size2d: [[4, 4], [4, 4]]
+  base_kernel_size3d: [[4, 4], [4, 4], [4, 4]]
+  coarse_ratios: [4, 8]
+  eval_coarse_ratio: 4
+# Decoder base_kernel MUST mirror the encoder ([4,4]) for exact reconstruction
+# (upsample stays the default transpose; resize_conv is NOT used).
+decoder:
+  base_kernel_size2d: [[4, 4], [4, 4]]
+  base_kernel_size3d: [[4, 4], [4, 4], [4, 4]]
+processor:
+  space_mixing:
+    _partial_: true
+    _target_: walrus.models.spatial_blocks.cross_scale_attention_twogrid.TwoGridCrossScaleAttention
+    num_heads: 8
+    fine_window: 3
+    coarse_window: global        # local coarse self-attn -> O(N_c*w^d); reach via depth
+    prolong_window: 2            # fine reads parent's 2^d coarse nbhd (interp)
+    coarse_coupling: bidirectional
+    restrict_moments: true
+  time_mixing:
+    _partial_: true
+    _target_: walrus.models.temporal_blocks.axial_time_attention.AxialTimeAttention
+    num_heads: 8
+  _partial_: true
+  _target_: walrus.models.spatiotemporal_blocks.space_time_split.SpaceTimeSplitBlock

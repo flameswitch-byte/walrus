@@ -1,0 +1,35 @@
+defaults:
+  - encoder: twogrid_vstride_encoder
+  - decoder: vstride_decoder
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+_target_: walrus.models.IsotropicModel
+hidden_dim: 256
+projection_dim: 96
+intermediate_dim: 96
+processor_blocks: 6
+drop_path: 0.05
+groups: 8
+max_d: 3
+causal_in_time: False
+include_d: [2, 3]
+override_dimensionality: 3
+jitter_patches: True
+gradient_checkpointing_freq: 0
+input_field_drop: 0.0
+per_axis_tokens:   # null -> default (32/axis 2D, 16/axis true-3D); raise for higher res
+processor:
+  space_mixing:
+    _partial_: true
+    _target_: walrus.models.spatial_blocks.cross_scale_attention_twogrid.TwoGridCrossScaleAttention
+    num_heads: 8
+    fine_window: 3
+    coarse_window: global        # coarse self-attn global (carries global reach)
+    prolong_window: 3            # fine reads parent's 3^d coarse nbhd (interp, no seams)
+    coarse_coupling: bidirectional
+  time_mixing:
+    _partial_: true
+    _target_: walrus.models.temporal_blocks.axial_time_attention.AxialTimeAttention
+    num_heads: 8
+  _partial_: true
+  _target_: walrus.models.spatiotemporal_blocks.space_time_split.SpaceTimeSplitBlock

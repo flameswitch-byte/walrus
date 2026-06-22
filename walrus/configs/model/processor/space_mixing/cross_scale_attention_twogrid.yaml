@@ -1,0 +1,17 @@
+_partial_: true
+_target_: walrus.models.spatial_blocks.cross_scale_attention_twogrid.TwoGridCrossScaleAttention
+num_heads: 8
+mlp_dim:
+# --- cross-scale knobs (knowledge_base/walrus_crossscale_attention.md, Design B) ---
+fine_window: 3        # fine LOCAL self-attention extent (k^d keys/token); always windowed.
+coarse_window: global # COARSE SELF-attention locality ONLY:
+                      #   'global' -> all coarse<->coarse (carries global reach; O(N_c^2))
+                      #   int w    -> coarse attends its w^d coarse nbhd; reach grows with
+                      #               depth (no single-block global reach). Tweakable knob.
+prolong_window: 2     # fine reads its parent's p^d coarse neighborhood (interpolation,
+                      # no seams). p=1 = single-parent injection (blocky). Always local.
+coarse_coupling: bidirectional  # restriction: 'bidirectional' (coarse reads its own
+                                # ratio^d children) | 'one_way' (coarse self-attn only).
+                                # Cross reads are ALWAYS local; total cost O(N_f)+O(N_c^2).
+restrict_moments: true  # add per-cell (mean||var) saliency to the restriction so coarse
+                        # tokens preserve sub-cell sharpness (shocks/interfaces; §10).

@@ -1,0 +1,24 @@
+defaults:
+- field_index_map_override: full_well_field_index
+well_base_path: /data/users/jarvislam1999/neural_pde/the_well/datasets/
+wandb_data_name: toy_offline
+# Single local-only smoke config, works at any per_axis_tokens now that the stride
+# chooser is a soft target (adaptive, kernel-aware): active_matter (256x256) and
+# turbulent_radiative_layer_2D (128x384) both resolve at 32 (default) AND 64 (high-res;
+# 384->64 via patch 6=(3,2)). Two datasets also exercise the variable-shape batching path.
+module_parameters:
+  _target_: walrus.data.MixedWellDataModule
+  prefetch_field_names: false
+  batch_size: 2
+  n_steps_input: 10
+  n_steps_output: 1
+  min_dt_stride: 1
+  max_dt_stride: 1
+  max_samples: 200
+  well_dataset_info:
+    active_matter:
+      include_filters: []
+      exclude_filters: []
+    turbulent_radiative_layer_2D:
+      include_filters: []
+      exclude_filters: []

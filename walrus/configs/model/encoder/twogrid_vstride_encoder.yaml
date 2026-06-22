@@ -1,0 +1,28 @@
+_partial_: true
+_target_: walrus.models.encoders.twogrid_vstride_encoder.TwoGridSpaceBagVstrideEncoder
+learned_pad: true
+base_kernel_size1d:
+  - [4, 4]
+base_kernel_size2d:
+  - [8, 4]
+  - [8, 4]
+base_kernel_size3d:
+  - [8, 4]
+  - [8, 4]
+  - [8, 4]
+groups: 12
+kernel_scales_seq:
+  - [2, 2]
+  - [4, 2]
+  - [4, 4]
+  - [8, 4]
+variable_downsample: true
+variable_deterministic_ds: true
+anti_aliased_stride: false
+# --- Design B coarse (un-fused raw-field) tokenizer ---
+coarse_ratios: [2, 4, 8]      # fine/coarse size ratio, sampled per-forward in train
+eval_coarse_ratio: 4       # fixed ratio at eval (deterministic, persistent coarse grid)
+coarse_extra_div: 2        # coarse first-conv width = inner_dim // this (narrow)
+activation:
+  _partial_: true
+  _target_: torch.nn.SiLU

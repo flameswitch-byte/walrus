@@ -53,9 +53,11 @@ class SpaceTimeSplitBlock(nn.Module):
         self.time_mixing.make_rope_learnable(per_axis)
         self.space_mixing.make_rope_learnable(per_axis)
 
-    def forward(self, x, bcs, return_att=False):
+    def forward(self, x, bcs, coarse=None, coarse_ratio=None, return_att=False):
         # input is t x b x c x h x w
         T, B, C, H, W, D = x.shape
+        # Time attention runs on the FINE grid only (coarse is per-frame spatial-global
+        # and passes through untouched). See Design B, knowledge_base doc.
         if self.gradient_checkpointing:
             # kwargs seem to need to be passed explicitly
             wrapped_temporal = partial(self.time_mixing, return_att=return_att)
@@ -64,21 +66,46 @@ class SpaceTimeSplitBlock(nn.Module):
             x, t_att = self.time_mixing(x, return_att=return_att)  # Residual in block
         # Temporal handles the rearrange so still is t x b x c x h x w
         x = rearrange(x, "t b c h w d -> (t b) c h w d")
+
+        two_grid = coarse is not None
+        if two_grid:
+            Tc = coarse.shape[0]
+            coarse = rearrange(coarse, "t b c h w d -> (t b) c h w d")
+
         if self.gradient_checkpointing:
             # kwargs seem to need to be passed explicitly
-            wrapped_spatial = partial(self.space_mixing, return_att=return_att)
-            x, s_att = checkpoint(wrapped_spatial, x, bcs, use_reentrant=False)
+            if two_grid:
+                wrapped_spatial = partial(
+                    self.space_mixing,
+                    coarse=coarse,
+                    coarse_ratio=coarse_ratio,
+                    return_att=return_att,
+                )
+                x, coarse, s_att = checkpoint(
+                    wrapped_spatial, x, bcs, use_reentrant=False
+                )
+            else:
+                wrapped_spatial = partial(self.space_mixing, return_att=return_att)
+                x, s_att = checkpoint(wrapped_spatial, x, bcs, use_reentrant=False)
         else:
-            x, s_att = self.space_mixing(
-                x, bcs, return_att=return_att
-            )  # Convnext has the residual in the block
+            if two_grid:
+                x, coarse, s_att = self.space_mixing(
+                    x, bcs, coarse=coarse, coarse_ratio=coarse_ratio,
+                    return_att=return_att,
+                )
+            else:
+                x, s_att = self.space_mixing(
+                    x, bcs, return_att=return_att
+                )  # Convnext has the residual in the block
         x = rearrange(x, "(t b) c h w d -> t b c h w d", t=T)
+        if two_grid:
+            coarse = rearrange(coarse, "(t b) c h w d -> t b c h w d", t=Tc)
         # MLP input is channels last - #TODO redefine as 1x1 conv to avoid reshape
         x = self.channel_mixing(
             x
         )  # Currently set to identity, but needs to be reshaped generally
 
-        if return_att:
-            return x, t_att + s_att  # t_att, t_bias, x_att, x_bias, y_att, y_bias
-        else:
-            return x, []
+        att = t_att + s_att if return_att else []
+        if two_grid:
+            return x, coarse, att
+        return x, att

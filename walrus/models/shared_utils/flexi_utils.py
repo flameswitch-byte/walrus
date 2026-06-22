@@ -66,64 +66,100 @@ def generate_two_conv_combinations(kernel_scales_seq, spatial_dims):
     return kernel_scales_seq1, kernel_scales_seq2
 
 
+# ``patch -> (stride1, stride2)`` with stride1*stride2 == patch. base_kernel must be >=
+# each stride or the strided conv skips pixels. ONLY EVEN strides: odd strides (e.g. 3)
+# don't round-trip through the vstride jitterer/decoder (reconstruction comes out short),
+# so the soft-target chooser must pick from even-stride patches only -- it degrades to the
+# nearest such patch rather than hitting an unsafe one.
+_PATCH_DICT = {
+    0: (1, 1),
+    1: (1, 1),
+    2: (2, 1),  # even strides only; 2=(2,1) round-trips (verified on 128-axis @ 64 tokens)
+    4: (2, 2),
+    8: (4, 2),
+    12: (6, 2),
+    16: (4, 4),
+    24: (6, 4),
+    32: (8, 4),
+}
+
+
 def choose_kernel_size_deterministic(
     x_shape: Tuple[int, ...],
+    per_axis_tokens: int = None,
+    base_kernel: Tuple[Tuple[int, ...], Tuple[int, ...]] = None,
 ) -> Tuple[Tuple[int, int], ...]:
     """
-    Choose a kernel size deterministically from image size.
-    We fix a target number of tokens per axis and choose the kernel size accordingly.
-    This target differs between 2D and 3D images
+    Choose the per-axis ``(stride1, stride2)`` tokenizer patch from the image size.
+
+    ``per_axis_tokens``:
+      * ``None`` (default) -> LEGACY EXACT behavior, unchanged: 32 tokens/axis for 1D/2D
+        and 1-2-axis 3D, 16/axis for true 3D volumes; requires ``axis % target == 0`` and
+        ``axis//target`` to be a supported patch (asserts otherwise). The flat baseline
+        relies on this path being byte-identical.
+      * an int -> SOFT target (resolution lever, robust): for each axis pick the patch
+        that (a) divides the axis, (b) has strides <= ``base_kernel`` (no gappy conv), and
+        (c) gives a token count CLOSEST to the target. Never crashes (patch 1 always
+        valid) and degrades gracefully on axes that can't hit the target exactly -- the
+        model handles variable per-axis token counts natively (vstride/FlexiViT).
+
+    ``base_kernel`` = ``(base_kernel1_per_axis, base_kernel2_per_axis)`` (the encoder's
+    layer-1/2 kernels). Used only on the soft-target path to exclude patches whose stride
+    exceeds the kernel. If omitted, no kernel filtering is applied.
     """
-    # This patch dict works with the Well data dimensions.
-    # Add functionality to make this adapt to other dimensions if needed later
-    patch_dict = {
-        0: (1, 1),
-        1: (1, 1),
-        4: (2, 2),
-        8: (4, 2),
-        12: (6, 2),
-        16: (4, 4),
-        24: (6, 4),
-        32: (8, 4),
-    }
-    if len(x_shape) == 1:
-        per_axis_tokens = 512 // 16
-        H = x_shape[0]
-        non_singleton_D = int(H != 1)
-        assert H % per_axis_tokens == 0 or H == 1
-        h_patch = H // per_axis_tokens
-        return (patch_dict[h_patch],)
-    elif len(x_shape) == 2:
-        per_axis_tokens = 512 // 16
-        H, W = x_shape[:2]
-        non_singleton_D = int(H != 1) + int(W != 1)
-        assert (H % per_axis_tokens == 0 or H == 1) and (
-            W % per_axis_tokens == 0 or W == 1
-        )
-        h_patch = H // per_axis_tokens
-        w_patch = W // per_axis_tokens
-        return (patch_dict[h_patch], patch_dict[w_patch])
-    elif len(x_shape) == 3:
-        # per_axis_tokens = 256 // 16
+    patch_dict = _PATCH_DICT
+    nd = len(x_shape)
+    if nd not in (1, 2, 3):
+        raise ValueError("Image size must be 1, 2 or 3 dimensions")
+
+    # default (legacy) token target
+    if nd == 3:
         H, W, D = x_shape[:3]
         non_singleton_D = int(H != 1) + int(W != 1) + int(D != 1)
-        if non_singleton_D == 1:
-            per_axis_tokens = 512 // 16
-        elif non_singleton_D == 2:
-            per_axis_tokens = 512 // 16
-        else:
-            per_axis_tokens = 256 // 16
-        assert (
-            (H % per_axis_tokens == 0 or H == 1)
-            and (W % per_axis_tokens == 0 or W == 1)
-            and (D % per_axis_tokens == 0 or D == 1)
-        )
-        h_patch = H // per_axis_tokens
-        w_patch = W // per_axis_tokens
-        d_patch = D // per_axis_tokens
-        return (patch_dict[h_patch], patch_dict[w_patch], patch_dict[d_patch])
+        default_target = 512 // 16 if non_singleton_D <= 2 else 256 // 16
     else:
-        raise ValueError("Image size must be 1, 2 or 3 dimensions")
+        default_target = 512 // 16
+    strict = per_axis_tokens is None
+    target = default_target if strict else int(per_axis_tokens)
+
+    def _kbound(axis_idx: int) -> Tuple[int, int]:
+        if base_kernel is None:
+            return (1 << 30, 1 << 30)
+        k1, k2 = base_kernel
+        b1 = k1[axis_idx] if axis_idx < len(k1) else (1 << 30)
+        b2 = k2[axis_idx] if axis_idx < len(k2) else (1 << 30)
+        return (int(b1), int(b2))
+
+    def _pick(axis_idx: int, axis_len: int) -> Tuple[int, int]:
+        if axis_len == 1:
+            return patch_dict[0]
+        if strict:
+            assert axis_len % target == 0, (
+                f"axis size {axis_len} not divisible by per_axis_tokens {target}"
+            )
+            p = axis_len // target
+            assert p in patch_dict, (
+                f"patch {p} (= {axis_len}//{target}) not in patch_dict "
+                f"{sorted(patch_dict)}; set per_axis_tokens (soft target) or extend it"
+            )
+            return patch_dict[p]
+        # soft target: patches that divide the axis and fit under the kernel
+        b1, b2 = _kbound(axis_idx)
+        cands = [
+            p
+            for p in patch_dict
+            if p >= 1
+            and axis_len % p == 0
+            and patch_dict[p][0] <= b1
+            and patch_dict[p][1] <= b2
+        ]
+        if not cands:  # patch 1 = (1,1) always fits, but guard anyway
+            cands = [1]
+        # closest token count to target; tie -> smaller patch (finer)
+        best = min(cands, key=lambda p: (abs(axis_len // p - target), p))
+        return patch_dict[best]
+
+    return tuple(_pick(i, s) for i, s in enumerate(x_shape[:nd]))
 
 
 InterpolationType = Literal[
