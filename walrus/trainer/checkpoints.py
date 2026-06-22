@@ -198,7 +198,11 @@ class CheckPointLoader:
                         state_dict = torch.load(
                             os.path.join(
                                 self.load_checkpoint_path, "full_checkpoint.pt"
-                            )
+                            ),
+                            map_location=(
+                                "cuda" if torch.cuda.is_available() else "cpu"
+                            ),
+                            weights_only=False,
                         )
                         model.load_state_dict(state_dict["app"]["model"])
                         if optimizer is not None:

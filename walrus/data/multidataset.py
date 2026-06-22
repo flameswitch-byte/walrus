@@ -246,46 +246,69 @@ class MixedWellDataset(Dataset):
             dataset_path = info.get("path", None)
             normalization_path = info.get("normalization_path", None)
 
-            subdset = self.inner_dataset_type(
-                path=dataset_path,
-                normalization_path=normalization_path,
-                well_base_path=well_base_path,
-                well_dataset_name=dataset_name,
-                well_split_name=well_split_name,
-                include_filters=include_filters,
-                exclude_filters=exclude_filters,
-                use_normalization=use_normalization,
-                max_rollout_steps=max_rollout_steps,
-                n_steps_input=max(1, int(n_steps_input * step_downsample_factor)),
-                n_steps_output=n_steps_output,
-                min_dt_stride=min_dt_stride,
-                max_dt_stride=max_dt_stride,
-                restrict_num_trajectories=restrict_num_trajectories,
-                restrict_num_samples=restrict_num_samples,
-                restriction_seed=restriction_seed,
-                start_output_steps_at_t=start_output_steps_at_t,
-                flatten_tensors=flatten_tensors,
-                cache_small=cache_small,
-                max_cache_size=max_cache_size,
-                return_grid=return_grid,
-                normalize_time_grid=normalize_time_grid,
-                boundary_return_type=boundary_return_type,
-                full_trajectory_mode=full_trajectory_mode,
-                name_override=name_override,
-                transform=(
-                    transform[dataset_name]
-                    if transform is not None and dataset_name in transform
-                    else None
-                ),
-                field_transforms=dset_field_transforms,
-                min_std=min_std,
-                storage_options=storage_options,
-                **(
-                    dataset_kws[dataset_name]
-                    if dataset_kws is not None and dataset_name in dataset_kws
-                    else {}
-                ),
-            )
+            try:
+                subdset = self.inner_dataset_type(
+                    path=dataset_path,
+                    normalization_path=normalization_path,
+                    well_base_path=well_base_path,
+                    well_dataset_name=dataset_name,
+                    well_split_name=well_split_name,
+                    include_filters=include_filters,
+                    exclude_filters=exclude_filters,
+                    use_normalization=use_normalization,
+                    max_rollout_steps=max_rollout_steps,
+                    n_steps_input=max(1, int(n_steps_input * step_downsample_factor)),
+                    n_steps_output=n_steps_output,
+                    min_dt_stride=min_dt_stride,
+                    max_dt_stride=max_dt_stride,
+                    restrict_num_trajectories=restrict_num_trajectories,
+                    restrict_num_samples=restrict_num_samples,
+                    restriction_seed=restriction_seed,
+                    start_output_steps_at_t=start_output_steps_at_t,
+                    flatten_tensors=flatten_tensors,
+                    cache_small=cache_small,
+                    max_cache_size=max_cache_size,
+                    return_grid=return_grid,
+                    normalize_time_grid=normalize_time_grid,
+                    boundary_return_type=boundary_return_type,
+                    full_trajectory_mode=full_trajectory_mode,
+                    name_override=name_override,
+                    transform=(
+                        transform[dataset_name]
+                        if transform is not None and dataset_name in transform
+                        else None
+                    ),
+                    field_transforms=dset_field_transforms,
+                    min_std=min_std,
+                    storage_options=storage_options,
+                    **(
+                        dataset_kws[dataset_name]
+                        if dataset_kws is not None and dataset_name in dataset_kws
+                        else {}
+                    ),
+                )
+            except OSError as e:
+                data_dir = dataset_path or os.path.join(
+                    well_base_path, dataset_name, "data", well_split_name
+                )
+                corrupt = []
+                if os.path.isdir(data_dir):
+                    import h5py
+                    for fname in sorted(os.listdir(data_dir)):
+                        if not fname.endswith((".hdf5", ".h5")):
+                            continue
+                        fpath = os.path.join(data_dir, fname)
+                        try:
+                            with h5py.File(fpath, "r"):
+                                pass
+                        except OSError:
+                            corrupt.append(fpath)
+                if corrupt:
+                    raise OSError(
+                        f"Corrupt file(s) in {data_dir}:\n"
+                        + "\n".join(f"  {f}" for f in corrupt)
+                    ) from e
+                raise OSError(f"Failed to load dataset '{dataset_name}' from {data_dir}") from e
             self.field_name_transforms[subdset.metadata.dataset_name] = (
                 field_name_transforms
             )
@@ -294,7 +317,10 @@ class MixedWellDataset(Dataset):
                 self.offsets.append(self.offsets[-1] + offset)
             except ValueError:
                 raise ValueError(
-                    f"Dataset {dataset_path} is empty. Check that n_steps < trajectory_length in file."
+                    f"Dataset '{dataset_name}' (path={dataset_path}) is empty. "
+                    f"Check that n_steps ({max(1, int(n_steps_input * step_downsample_factor))} + {n_steps_output}) "
+                    f"< trajectory_length in file, or that the dataset exists at "
+                    f"{well_base_path}/{dataset_name}/data/{well_split_name}/"
                 )
             self.sub_dsets.append(subdset)
             self.dset_to_metadata[dataset_name] = subdset.metadata

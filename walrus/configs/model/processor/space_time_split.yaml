@@ -1,5 +1,5 @@
 defaults:
-  - space_mixing: axial_spatial_attention
+  - space_mixing: full_spatial_attention
   - time_mixing: axial_time_attention
   - channel_mixing: identity
 _partial_: true

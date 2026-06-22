@@ -1,3 +1,4 @@
 # @package _global_
+experiment_dir: /data/users/jarvislam1999/neural_pde/checkpoints
 data:
   well_base_path: "../../datasets/"
