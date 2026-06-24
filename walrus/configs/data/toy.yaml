@@ -1,6 +1,6 @@
 defaults:
 - field_index_map_override: full_well_field_index
-well_base_path: /data/users/jarvislam1999/neural_pde/the_well/datasets/
+well_base_path: /data/repos/neural_pde/the_well/datasets/  # sshfs mount of devvm20873; no-path datasets resolve here (no HF streaming)
 wandb_data_name: all_2d
 module_parameters:
   _target_: walrus.data.MixedWellDataModule

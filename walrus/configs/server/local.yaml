@@ -1,4 +1,4 @@
 # @package _global_
-experiment_dir: /data/users/jarvislam1999/neural_pde/checkpoints
+experiment_dir: /data/repos/neural_pde/checkpoints
 data:
-  well_base_path: "../../datasets/"
+  well_base_path: "/data/repos/neural_pde/the_well/datasets/"
