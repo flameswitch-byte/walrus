@@ -157,6 +157,13 @@ class Trainer:
         big_batch_before: int = 0,
         clip_gradient: float = 0.0,
         loss_multiplier: float = 1.0,
+        spectral_loss_weight: float = 0.0,
+        spectral_loss_fn: Optional[Callable] = None,
+        spectral_window_policy: str = "nonperiodic",
+        spectral_psd_eps: float = 1e-8,
+        spectral_rel_floor: float = 1e-2,
+        spectral_n_bins: Optional[int] = None,
+        spectral_drop_dc: bool = True,
         minimum_context: int = 1,
         validation_full_trajectory_ensemble_size: int = 1,
         validation_one_step_ensemble_size: int = 1,
@@ -301,6 +308,30 @@ class Trainer:
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.loss_fn = loss_fn
+        # Optional spectral (energy-spectrum) training term (idea 4.A.1). Gated purely by
+        # spectral_loss_weight: 0.0 -> never evaluated, baseline loss bit-identical. When
+        # the weight is on but no explicit fn is given (e.g. you just pass
+        # +trainer.spectral_loss_weight=0.02 on top of trainer=toy), build the default
+        # SpectralLogMAE from the scalar knobs so the weight alone turns it on -- it must
+        # never be a silent no-op. Computed in the same normalized-delta space as the L1.
+        self.spectral_loss_weight = spectral_loss_weight
+        if spectral_loss_weight != 0.0 and spectral_loss_fn is None:
+            from walrus.trainer.losses import SpectralLogMAE
+
+            spectral_loss_fn = SpectralLogMAE(
+                psd_eps=spectral_psd_eps,
+                rel_floor=spectral_rel_floor,
+                n_bins=spectral_n_bins,
+                drop_dc=spectral_drop_dc,
+                window_policy=spectral_window_policy,
+            )
+            logger.info(
+                f"Spectral loss ON (weight={spectral_loss_weight}): built default "
+                f"SpectralLogMAE(window_policy={spectral_window_policy}, "
+                f"psd_eps={spectral_psd_eps}, rel_floor={spectral_rel_floor}, "
+                f"n_bins={spectral_n_bins}, drop_dc={spectral_drop_dc})."
+            )
+        self.spectral_loss_fn = spectral_loss_fn
         self.prediction_type = prediction_type
         self.skip_checkpointing = skip_checkpointing
         self.validation_suite = validation_suite
@@ -1173,6 +1204,8 @@ class Trainer:
         """Train the model for one epoch by looping over the dataloader."""
         self.model.train()
         epoch_loss = 0.0
+        spectral_epoch_loss = 0.0
+        last_spectral_loss = torch.tensor(0.0, device=self.device)
         avg_grad_norm = torch.tensor(0.0).to(self.device)
         last_grad_norm = torch.tensor(0.0).to(self.device)
         train_logs: dict[str, Any] = {}
@@ -1242,13 +1275,25 @@ class Trainer:
                     assert y_ref.shape == y_pred.shape, (
                         f"Mismatching shapes between reference {y_ref.shape} and prediction {y_pred.shape}"
                     )
-                    loss = (
-                        self.loss_multiplier
-                        * self.loss_fn(
-                            y_pred, y_ref, current_metadata, eps=self.model_epsilon
+                    main_loss = self.loss_fn(
+                        y_pred, y_ref, current_metadata, eps=self.model_epsilon
+                    ).mean()
+                    # Optional energy-spectrum term (idea 4.A.1): penalizes the
+                    # small-scale blurring L1 is blind to. Same normalized-delta space
+                    # as the L1, so eps is well-scaled and no denorm is needed. It rides
+                    # the SAME loss_multiplier as the L1, so spectral_loss_weight is a
+                    # clean fraction of the L1 (e.g. 0.1 ~= 10% of the L1 magnitude),
+                    # not a value that has to absorb the multiplier.
+                    if (
+                        self.spectral_loss_fn is not None
+                        and self.spectral_loss_weight != 0.0
+                    ):
+                        spectral_raw = self.spectral_loss_fn(
+                            y_pred, y_ref, current_metadata
                         ).mean()
-                        / grad_acc_steps
-                    )
+                        main_loss = main_loss + self.spectral_loss_weight * spectral_raw
+                        last_spectral_loss = spectral_raw.detach()
+                    loss = self.loss_multiplier * main_loss / grad_acc_steps
                     del y_pred, y_ref  # Let gc free up a little before the BW pass
                 # If not AMP, then grad scaler is no op
                 self.grad_scaler.scale(loss).backward()
@@ -1291,6 +1336,11 @@ class Trainer:
             epoch_loss += (grad_acc_steps * loss.detach()) / len(
                 dataloader
             )  # Unscale loss for accurate measure.
+            # NOTE: last_spectral_loss is the raw per-microbatch spectral term (NOT
+            # divided by grad_acc_steps, unlike `loss`), so it must be accumulated as-is
+            # -- no grad_acc_steps factor (that factor only exists above to un-scale the
+            # gradient-accumulation division baked into `loss`).
+            spectral_epoch_loss += last_spectral_loss / len(dataloader)
 
             max_mem_GB = torch.cuda.max_memory_allocated() / 1024**3
             if i % self.log_interval == 0:
@@ -1324,6 +1374,8 @@ class Trainer:
             )
             i += 1
         train_logs["train_loss"] = epoch_loss
+        if self.spectral_loss_fn is not None and self.spectral_loss_weight != 0.0:
+            train_logs["train_spectral_loss"] = spectral_epoch_loss
         if self.gradient_log_level >= 1:
             train_logs["avg_grad_norm"] = avg_grad_norm.item()
         if self.lr_scheduler:

@@ -1,0 +1,30 @@
+# Toy trainer + the energy-spectrum term (idea 4.A.1). Inherits `toy` (NOT `defaults`),
+# so all your devserver/toy settings are preserved; only the spectral weight is added.
+# The loss is built internally from the scalar knobs in Trainer.__init__
+# (spectral_window_policy / spectral_psd_eps / spectral_n_bins / spectral_drop_dc) and
+# is gated purely by the weight below -- weight 0 would be a baseline-identical no-op.
+#
+# Equivalent to: trainer=toy +trainer.spectral_loss_weight=0.02
+# Calibrated ~0.02 -> ~10% of the L1; sweep 0.01-0.05; judge on rollout-HORIZON
+# binned_spectral_mse.
+defaults:
+  - toy
+  - _self_
+
+spectral_loss_weight: 0.02   # > 0 turns it on; ~10% of the L1
+# Optional overrides (defaults shown):
+# spectral_window_policy: nonperiodic   # nonperiodic | always | never
+# spectral_psd_eps: 1.0e-8
+# spectral_n_bins: null                 # null -> ~sqrt(min spatial extent)
+# spectral_drop_dc: True
+
+# Add a spectral eval metric (toy ships VRMSE only) so the spectrum can be judged.
+# We use SpectralLogMAE (the same metric as the training term) rather than
+# the_well's binned_spectral_mse: the latter logs a PER-WAVENUMBER-BIN vector, which
+# split_up_losses expands into ~650 wandb keys (mse/nmse per_bin_k x mean/median x
+# system) and floods the workspace. SpectralLogMAE returns one scalar per (field,
+# timestep) -> ring-averaged, so it logs like VRMSE (~one curve per system) and is
+# directly comparable to the training spectral_raw.
+validation_suite:
+  - _target_: the_well.benchmark.metrics.VRMSE
+  - _target_: walrus.trainer.losses.SpectralLogMAE
