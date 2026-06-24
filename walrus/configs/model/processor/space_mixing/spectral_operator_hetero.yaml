@@ -1,0 +1,20 @@
+_partial_: true
+_target_: walrus.models.spatial_blocks.spectral_operator.OperatorSplitBlock
+norm_groups: 8
+keep_modes: null
+laplace_power: 1.0
+gate_mode: static_channel
+attention:
+  # HETEROGENEOUS backbone (mirrors medium_walrus_hetero_multipole: 3 local + 2 multipole + 3 full).
+  _partial_: true
+  _target_: walrus.models.spatial_blocks.heterogeneous_attention.HeterogeneousAttention
+  num_heads: 8
+  n_local: 5
+  n_strided: 0
+  n_multipole: 3
+  n_full: 0
+  local_radius: 1
+  strided_strides: []
+  multipole_pool: [2, 3, 4]
+  multipole_eval_pool: 3
+  multipole_order: 2

@@ -1,0 +1,12 @@
+_partial_: true
+_target_: walrus.models.spatial_blocks.spectral_operator.OperatorSplitBlock
+norm_groups: 8
+keep_modes: null          # null = all Fourier modes (inverse-Laplacian suppresses high-k anyway)
+laplace_power: 1.0        # filter base = -1/|k|^(2*power); 1.0 = inverse-Laplacian
+gate_mode: static_channel # per-channel layer-scale gate, zero-init (soft static mix, §13.3)
+attention:
+  # FLAT backbone. n_full == num_heads -> warm-starts bit-exactly from medium_walrus.
+  _partial_: true
+  _target_: walrus.models.spatial_blocks.full_attention.FullAttention
+  num_heads: 8
+  mlp_dim:

@@ -1,0 +1,26 @@
+defaults:
+  - encoder: spacebag_and_vstride_encoder
+  - decoder: vstride_decoder
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+  - override processor/space_mixing: spectral_operator_hetero  # HETERO backbone + gated spectral operator
+  - _self_
+# Operator-split block (knowledge_base/walrus_attention_design.md §13.2/§13.4/§13.10).
+# Gate is zero-init -> warm-starts bit-exactly from a hetero checkpoint (same inner config).
+_target_: walrus.models.IsotropicModel
+hidden_dim: 256
+projection_dim: 96
+intermediate_dim: 96
+processor_blocks: 6
+drop_path: 0.05
+groups: 8
+max_d: 3
+causal_in_time: False
+include_d: [2, 3]
+override_dimensionality: 3
+jitter_patches: True
+gradient_checkpointing_freq: 0
+input_field_drop: 0.0
+processor:
+  time_mixing:
+    num_heads: 8   # must divide hidden_dim (256); default config is 12 -> not divisible
