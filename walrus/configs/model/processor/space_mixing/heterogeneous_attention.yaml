@@ -1,0 +1,13 @@
+_partial_: true
+_target_: walrus.models.spatial_blocks.heterogeneous_attention.HeterogeneousAttention
+num_heads: 8
+# Head allocation (must sum to num_heads). v1 default: 4 local + 2 strided + 2 full.
+# n_strided: 0  -> mid-range-slot ablation (e.g. 6 local + 2 full).
+# n_full: 8     -> recovers flat FullAttention exactly (warm-start baseline).
+n_local: 4
+n_strided: 2
+n_full: 2
+local_radius: 1
+strided_radius: 1
+strided_strides: [2, 4]   # one stride per strided head; len == n_strided
+mlp_dim:

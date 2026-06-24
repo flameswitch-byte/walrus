@@ -1,0 +1,36 @@
+defaults:
+  - encoder: spacebag_and_vstride_encoder
+  - decoder: vstride_decoder
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+_target_: walrus.models.IsotropicModel
+hidden_dim: 256
+projection_dim: 96
+intermediate_dim: 96
+processor_blocks: 6
+drop_path: 0.05
+groups: 8
+max_d: 3
+causal_in_time: False
+include_d: [2, 3]
+override_dimensionality: 3
+jitter_patches: True
+gradient_checkpointing_freq: 0
+input_field_drop: 0.0
+processor:
+  space_mixing:
+    _partial_: true
+    _target_: walrus.models.spatial_blocks.heterogeneous_attention.HeterogeneousAttention
+    num_heads: 8
+    n_local: 4
+    n_strided: 2
+    n_full: 2
+    local_radius: 1
+    strided_radius: 1
+    strided_strides: [2, 4]
+  time_mixing:
+    _partial_: true
+    _target_: walrus.models.temporal_blocks.axial_time_attention.AxialTimeAttention
+    num_heads: 8
+  _partial_: true
+  _target_: walrus.models.spatiotemporal_blocks.space_time_split.SpaceTimeSplitBlock
