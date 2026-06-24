@@ -1,6 +1,7 @@
 import dataclasses
 import logging
 import os
+import time
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import numpy as np
@@ -18,6 +19,38 @@ from walrus.data.inflated_dataset import (
 from .utils import get_dict_depth
 
 logger = logging.getLogger(__name__)
+
+# Number of times to retry a single-sample read before giving up, and the base
+# (exponential) backoff in seconds. Streamed datasets (e.g. shear_flow over
+# hf://) can transiently drop a connection mid-chunk
+# (httpx.RemoteProtocolError), which would otherwise kill the whole run.
+_READ_MAX_RETRIES = int(os.environ.get("WALRUS_READ_MAX_RETRIES", "5"))
+_READ_BACKOFF_BASE = float(os.environ.get("WALRUS_READ_BACKOFF_BASE", "1.0"))
+
+
+def _read_with_retry(read_fn, *, describe):
+    """Call read_fn(), retrying on transient errors with exponential backoff.
+
+    Retries any exception (network reads surface as a variety of httpx/httpcore/
+    OSError types), logging each attempt. Re-raises the last error if all
+    attempts fail so the caller can handle it as before.
+    """
+    last_exc = None
+    for attempt in range(_READ_MAX_RETRIES + 1):
+        try:
+            return read_fn()
+        except Exception as e:  # noqa: BLE001 - intentionally broad; network reads vary
+            last_exc = e
+            if attempt < _READ_MAX_RETRIES:
+                delay = _READ_BACKOFF_BASE * (2**attempt)
+                logger.warning(
+                    f"Read failed for {describe} (attempt {attempt + 1}/"
+                    f"{_READ_MAX_RETRIES + 1}): {type(e).__name__}: {e}. "
+                    f"Retrying in {delay:.1f}s."
+                )
+                time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 def update_field_names(metadata, field_name_transforms):
@@ -408,7 +441,11 @@ class MixedWellDataset(Dataset):
         )  # which dataset are we are on
         local_indexes = [index - max(self.offsets[file_idx], 0) for index in indices]
         try:
-            data = self.sub_dsets[file_idx][local_indexes]
+            data = _read_with_retry(
+                lambda: self.sub_dsets[file_idx][local_indexes],
+                describe=f"dataset={self.sub_dsets[file_idx].metadata.dataset_name} "
+                f"file_idx={file_idx} local_indexes={local_indexes}",
+            )
         except Exception:
             raise IndexError(
                 "FAILED AT ",

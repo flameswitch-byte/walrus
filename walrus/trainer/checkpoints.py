@@ -25,11 +25,25 @@ CHECKPOINT_METADATA_FILENAME = "metadata.pt"
 
 
 def delete_folder_or_symlink(folder: pathlib.Path):
-    """Delete a folder or a symlink to a folder."""
-    if folder.is_symlink():
+    """Delete a folder, or unlink a symlink to a folder, without following links.
+
+    ``lexists`` catches broken/dangling symlinks; ``ignore_errors`` on the
+    recursive delete tolerates half-written/cache-inconsistent dirs on network
+    filesystems.
+
+    WARNING (sshfs + ``follow_symlinks``): if the mount resolves symlinks
+    server-side, ``os.path.islink`` returns False for a real symlink here, so a
+    stale ``last``/``best`` symlink is indistinguishable from a directory and the
+    ``rmtree`` branch will follow it and delete its *target* checkpoint. There is
+    no reliable client-side guard for that case (``realpath``/``rename`` are
+    equally fooled -- verified empirically). Safeguard operationally instead:
+    keep the checkpoint tree free of symlinks (the save path below only ever
+    writes real copies, never symlinks) and do NOT mount with ``follow_symlinks``.
+    """
+    if os.path.islink(folder):
         folder.unlink()
-    else:
-        shutil.rmtree(folder)
+    elif os.path.lexists(folder):
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def checkpoint_already_exists(checkpoint_dirname: pathlib.Path) -> bool:
@@ -38,18 +52,22 @@ def checkpoint_already_exists(checkpoint_dirname: pathlib.Path) -> bool:
 
 
 def link_checkpoint(src_checkpoint: pathlib.Path, target_checkpoint: pathlib.Path):
-    """Create a symbolic link to an already existing checkpoint.
-    The link points to `src_checkpoint` and is named `target_checkpoint`.
-    It allows avoiding expensive copies of checkpoints when they refer to the same data.
+    """Materialize `target_checkpoint` as a full copy of `src_checkpoint`.
+
+    Despite the name, this copies rather than symlinks. Symlinks are unreliable on
+    some network filesystems (e.g. sshfs), where ``symlink_to`` can silently leave a
+    broken empty directory behind and crash the next save. Copying is filesystem
+    agnostic at the cost of extra space for the `last`/`best` checkpoints.
     To be used typically for saving last checkpoint that refers to an already existing one.
     """
-    # Link already exists
-    logger.info(f"Link checkpoint {target_checkpoint} to {src_checkpoint}")
-    if target_checkpoint.exists() and target_checkpoint.is_symlink():
-        target_checkpoint.unlink()
-    elif target_checkpoint.exists():
-        shutil.rmtree(target_checkpoint)
-    target_checkpoint.symlink_to(src_checkpoint, target_is_directory=True)
+    logger.info(f"Copy checkpoint {target_checkpoint} from {src_checkpoint}")
+    # Robustly clear any prior target. delete_folder_or_symlink never recurses
+    # through a symlink (even one sshfs hides from islink()), so it cannot delete
+    # the source checkpoint a stale `last`/`best` link points at.
+    delete_folder_or_symlink(target_checkpoint)
+    # dirs_exist_ok=True so a leftover dir (e.g. one rmtree could not remove on a
+    # network FS) does not crash the copy with FileExistsError.
+    shutil.copytree(src_checkpoint, target_checkpoint, dirs_exist_ok=True)
 
 
 def save_metadata(
@@ -266,15 +284,48 @@ class CheckPointLoader:
     ):
         pass
 
+    @staticmethod
+    def _is_usable_checkpoint(path: pathlib.Path) -> bool:
+        """A checkpoint is usable only if it has its metadata sidecar."""
+        return path.exists() and (path / CHECKPOINT_METADATA_FILENAME).exists()
+
     @property
     def last_checkpoint(self) -> pathlib.Path | None:
-        """Return the real path of the last checkpoints in the directory."""
-        last_checkpoint_dir = pathlib.Path(self.save_dir).joinpath("last")
-        if last_checkpoint_dir.exists():
+        """Return the checkpoint to resume from, resiliently.
+
+        Prefers ``last``, but only when it is actually usable (has metadata.pt).
+        Otherwise falls back to the highest-numbered ``step_N`` that has its
+        metadata. ``step_*`` directories are always real directories written
+        directly by the saver, so -- unlike ``last``/``best`` -- they are immune
+        to the stale-symlink corruption that an sshfs ``follow_symlinks`` mount
+        can introduce. This makes resume self-healing across machine migrations:
+        a broken/empty/symlinked ``last`` no longer aborts the run.
+        """
+        save_dir = pathlib.Path(self.save_dir)
+        last_checkpoint_dir = save_dir / "last"
+        if self._is_usable_checkpoint(last_checkpoint_dir):
             return last_checkpoint_dir.resolve()
-        else:
-            warnings.warn("No last checkpoint found")
-            return None
+
+        steps = []
+        if save_dir.exists():
+            for p in save_dir.iterdir():
+                suffix = p.name[len("step_") :]
+                if (
+                    p.name.startswith("step_")
+                    and suffix.isdigit()
+                    and self._is_usable_checkpoint(p)
+                ):
+                    steps.append((int(suffix), p))
+        if steps:
+            best = max(steps, key=lambda t: t[0])[1]
+            warnings.warn(
+                f"`last` checkpoint missing/unusable; resuming from highest valid "
+                f"step checkpoint instead: {best}"
+            )
+            return best.resolve()
+
+        warnings.warn("No usable checkpoint found")
+        return None
 
 
 class CheckPointer(CheckPointLoader):

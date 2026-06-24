@@ -12,9 +12,10 @@ module_parameters:
   max_dt_stride: 1
   max_samples: 500
   well_dataset_info:
-    active_matter:  # mount (local copy freed)
+    active_matter:  # LOCAL copy on devvm34106 (fast btrfs, no sshfs)
       include_filters: []
       exclude_filters: []
+      path: /data/users/jarvislam1999/neural_pde/the_well/datasets/active_matter
     planetswe:
       include_filters: []
       exclude_filters: []
@@ -49,15 +50,18 @@ module_parameters:
       include_filters: []
       exclude_filters: []
       path: hf://datasets/polymathic-ai/shear_flow
-    turbulent_radiative_layer_2D:
+    turbulent_radiative_layer_2D:  # LOCAL copy on devvm34106 (fast btrfs, no sshfs)
       include_filters: []
       exclude_filters: []
-    helmholtz_staircase:  # mount (local copy freed)
+      path: /data/users/jarvislam1999/neural_pde/the_well/datasets/turbulent_radiative_layer_2D
+    helmholtz_staircase:  # LOCAL copy on devvm34106 (fast btrfs, no sshfs)
       include_filters: []
       exclude_filters: []
-    viscoelastic_instability:  # mount (local copy freed)
+      path: /data/users/jarvislam1999/neural_pde/the_well/datasets/helmholtz_staircase
+    viscoelastic_instability:  # LOCAL copy on devvm34106 (fast btrfs, no sshfs)
       include_filters: []
       exclude_filters: []
+      path: /data/users/jarvislam1999/neural_pde/the_well/datasets/viscoelastic_instability
     # supernova_explosion_128:
     #   include_filters: []
     #   exclude_filters: []
