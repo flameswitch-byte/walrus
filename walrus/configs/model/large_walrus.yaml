@@ -1,0 +1,35 @@
+# ~90M flat baseline, DEFAULT-inspired (isotropic_model proportions: hidden 768,
+# intermediate 192, groups 12), depth-tuned to ~90M via processor_blocks 12 -> 7 (89.9M).
+# Iso-param (~within 2%) to large_walrus_twogrid_highres (91.4M). per_axis default 32
+# -> 1024 fine tokens. The flat rung of the resolution-unlock comparison
+# (knowledge_base/walrus_crossscale_attention.md §19) at ~original-Walrus shape.
+defaults:
+  - encoder: spacebag_and_vstride_encoder
+  - decoder: vstride_decoder
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+_target_: walrus.models.IsotropicModel
+hidden_dim: 768
+projection_dim: 96
+intermediate_dim: 192
+processor_blocks: 7           # default 12 -> 7 to land ~90M at hidden 768
+drop_path: 0.05
+groups: 12
+max_d: 3
+causal_in_time: False
+include_d: [2, 3]
+override_dimensionality: 3
+jitter_patches: True
+gradient_checkpointing_freq: 0
+input_field_drop: 0.0
+processor:
+  space_mixing:
+    _partial_: true
+    _target_: walrus.models.spatial_blocks.full_attention.FullAttention
+    num_heads: 8
+  time_mixing:
+    _partial_: true
+    _target_: walrus.models.temporal_blocks.axial_time_attention.AxialTimeAttention
+    num_heads: 8
+  _partial_: true
+  _target_: walrus.models.spatiotemporal_blocks.space_time_split.SpaceTimeSplitBlock

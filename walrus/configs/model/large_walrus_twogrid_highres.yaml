@@ -1,0 +1,56 @@
+# Two-grid high-res (64 tok), DEFAULT-inspired proportions (intermediate 192, groups 12),
+# sized for ISO-COMPUTE (not iso-param) vs flat large_walrus (89.9M @32). The fair axis for
+# the resolution-unlock comparison (§19) is COMPUTE, not params: per_axis_tokens=64 -> 4096
+# fine tokens = 4x the flat baseline's 1024, and per-block cost is ~14*h^2 PER TOKEN (fused
+# 4x MLP + QKV/out), so compute scales with tokens*h^2, NOT param count. Param-matching (the
+# old hidden 744 / 70.7M) was actually ~1.80x flat compute -> an unfair handicap. blocks 5 +
+# hidden 528 lands ~1.19x flat forward FLOPs (deliberately heavier; flat's O(N^2)
+# FullAttention is replaced by near-linear windowed two-grid attention). This mirrors the
+# medium pair's leeway (twogrid_highres is ~1.24x medium_walrus_scaled). Resulting params
+# ~50M < flat's 90M -- correct & expected: two-grid spends its compute budget on resolution
+# (4x tokens) instead of width. NOTE: analytical proxy excludes encoder/decoder (which add a
+# bit more to the high-token side); for tighter parity drop to 504/480, for more capacity 552.
+defaults:
+  - encoder: twogrid_vstride_encoder
+  - decoder: vstride_decoder
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+_target_: walrus.models.IsotropicModel
+hidden_dim: 528               # 528 (head_dim 66, /12 groups = 44) -> ~1.19x flat compute, ~50M params
+projection_dim: 96
+intermediate_dim: 192
+processor_blocks: 5
+drop_path: 0.05
+groups: 12
+max_d: 3
+causal_in_time: False
+include_d: [2, 3]
+override_dimensionality: 3
+jitter_patches: True
+gradient_checkpointing_freq: 0
+input_field_drop: 0.0
+per_axis_tokens: 64
+encoder:
+  base_kernel_size2d: [[4, 4], [4, 4]]
+  base_kernel_size3d: [[4, 4], [4, 4], [4, 4]]
+  coarse_ratios: [4, 8]
+  eval_coarse_ratio: 4
+decoder:
+  base_kernel_size2d: [[4, 4], [4, 4]]
+  base_kernel_size3d: [[4, 4], [4, 4], [4, 4]]
+processor:
+  space_mixing:
+    _partial_: true
+    _target_: walrus.models.spatial_blocks.cross_scale_attention_twogrid.TwoGridCrossScaleAttention
+    num_heads: 8
+    fine_window: 3
+    coarse_window: global
+    prolong_window: 2
+    coarse_coupling: bidirectional
+    restrict_moments: true
+  time_mixing:
+    _partial_: true
+    _target_: walrus.models.temporal_blocks.axial_time_attention.AxialTimeAttention
+    num_heads: 8
+  _partial_: true
+  _target_: walrus.models.spatiotemporal_blocks.space_time_split.SpaceTimeSplitBlock

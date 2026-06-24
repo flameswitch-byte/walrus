@@ -1,0 +1,47 @@
+# toy_full: toy-scale trainer (fp32, devserver) with the FULL eval suite + faithful eval lengths.
+# Use for runs / standalone rollout eval where the discriminating metrics matter
+# (binned_spectral_mse, PearsonR) and the long-horizon rollout (T up to 60) must be reached.
+# Differs from toy.yaml ONLY in eval scope + grad clip; training cost is otherwise identical.
+_target_: walrus.trainer.Trainer
+max_epoch: 100
+val_frequency: 5
+rollout_val_frequency: 10
+short_validation_length: 20   # toy: 5  -> match defaults (one-step val window)
+max_rollout_steps: 60         # toy: 30 -> reach T[21:60] (e.g. rayleigh long-horizon residual)
+num_time_intervals: 5         # toy: 3  -> match defaults (rollout bucket granularity)
+# When True, an eval pass reuses per-dataset caches from a prior interrupted run and
+# skips recomputing those datasets. When False, eval recomputes + overwrites caches.
+resume_eval: False
+# When True, skip the one-step validation pass and run rollout (full-trajectory) eval only.
+rollout_only: False
+# When True (with validation_mode), skip the valid split and evaluate the test split only.
+test_only: False
+# Hard cap on batches evaluated per dataset (applies even to full/rollout passes). null = no cap.
+max_val_batches: null
+enable_amp: False             # fp32 (faithful recipe; avoids bf16 rollout-fidelity confound)
+loss_fn:
+  _target_: the_well.benchmark.metrics.MAE
+formatter:
+  _target_: hydra.utils.get_class
+  path: walrus.data.well_to_multi_transformer.ChannelsFirstWithTimeFormatter
+revin:
+  _target_: walrus.trainer.normalization_strat.SamplewiseRevNormalization
+  _partial_: True
+prediction_type: delta
+grad_acc_steps: 4
+image_validation: False
+video_validation: False
+gradient_log_level: 0
+clip_gradient: 10.0           # toy: 5.0 -> match paper (Table 2)
+log_interval: 5
+loss_multiplier: 100.
+lr_scheduler_per_step: False
+validation_suite:
+  - _target_: the_well.benchmark.metrics.NRMSE
+  - _target_: the_well.benchmark.metrics.VRMSE
+  - _target_: the_well.benchmark.metrics.binned_spectral_mse
+  - _target_: the_well.benchmark.metrics.PearsonR
+batch_aggregation_fns:
+  - torch.mean
+  - torch.median
+  - torch.std

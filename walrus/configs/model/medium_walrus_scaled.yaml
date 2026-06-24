@@ -1,0 +1,36 @@
+# Iso-PARAMETER control for the twogrid-vs-flat comparison.
+# Plain medium_walrus (flat FullAttention, single grid) grown to ~21.7M params to match
+# medium_walrus_twogrid (21.64M), so a val-loss gap attributes to ARCHITECTURE, not capacity.
+# Lever = depth: processor_blocks 6 -> 13 (each block ~0.92M; 13 -> 21.71M, +0.3% of target).
+# NOTE: iso-param != iso-compute. 13 flat blocks cost ~2.2x the processor FLOPs of the
+# 6-block baseline (and more than twogrid), so report BOTH param- and compute-matched views.
+defaults:
+  - encoder: spacebag_and_vstride_encoder
+  - decoder: vstride_decoder
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+_target_: walrus.models.IsotropicModel
+hidden_dim: 256
+projection_dim: 96
+intermediate_dim: 96
+processor_blocks: 13          # scaled up from 6 (iso-param vs twogrid's 21.64M)
+drop_path: 0.05
+groups: 8
+max_d: 3
+causal_in_time: False
+include_d: [2, 3]
+override_dimensionality: 3
+jitter_patches: True
+gradient_checkpointing_freq: 0
+input_field_drop: 0.0
+processor:
+  space_mixing:
+    _partial_: true
+    _target_: walrus.models.spatial_blocks.full_attention.FullAttention
+    num_heads: 8
+  time_mixing:
+    _partial_: true
+    _target_: walrus.models.temporal_blocks.axial_time_attention.AxialTimeAttention
+    num_heads: 8
+  _partial_: true
+  _target_: walrus.models.spatiotemporal_blocks.space_time_split.SpaceTimeSplitBlock

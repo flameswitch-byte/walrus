@@ -1,0 +1,47 @@
+# Full production Walrus (~1.12B params), transcribed from the released
+# polymathic-ai/walrus extended_config.yaml. 40 SpaceTimeSplitBlocks at hidden 1408,
+# 16 heads, FullAttention (space) + AxialTimeAttention (time). Encoder/decoder group
+# defaults (spacebag_and_vstride / vstride, groups 12, base kernels 8->4) already match
+# the released dump verbatim, so only num_heads and the model-level scalars are set here.
+#
+# NOTE: the released dump also carried `static_axes: true` and a model-level
+# `weight_tied_axes: false`. `static_axes` is not consumed by this code version (it would
+# be silently swallowed by **kwargs), so it is omitted. `weight_tied_axes` only takes
+# effect inside FullAttention, so it is set under processor.space_mixing below.
+#
+# Single-GPU memory: ~18 GB static (fp32 params+grads+AdamW) regardless of AMP.
+# Keep gradient_checkpointing_freq>=1 and batch_size<=2 on one 80GB GPU (see comments).
+defaults:
+  - encoder: spacebag_and_vstride_encoder
+  - decoder: vstride_decoder
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+_target_: walrus.models.IsotropicModel
+hidden_dim: 1408
+projection_dim: 48
+intermediate_dim: 352
+processor_blocks: 40
+drop_path: 0.05
+groups: 16                       # model-level groups (encoder/decoder stay at 12 via their defaults)
+max_d: 3
+causal_in_time: True
+include_d: [2, 3]
+override_dimensionality: 0
+jitter_patches: True
+use_periodic_fixed_jitter: True
+gradient_checkpointing_freq: 2   # do NOT set to 0 at this scale -> OOM on a single GPU
+input_field_drop: 0.0
+processor:
+  space_mixing:
+    _partial_: true
+    _target_: walrus.models.spatial_blocks.full_attention.FullAttention
+    num_heads: 16
+    mlp_dim:                     # null -> defaults to hidden_dim*4 = 5632
+    weight_tied_axes: False      # matches released model-level weight_tied_axes: false
+  time_mixing:
+    _partial_: true
+    _target_: walrus.models.temporal_blocks.axial_time_attention.AxialTimeAttention
+    num_heads: 16
+    bias_type: 'rel'
+  _partial_: true
+  _target_: walrus.models.spatiotemporal_blocks.space_time_split.SpaceTimeSplitBlock
