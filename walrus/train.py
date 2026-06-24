@@ -204,6 +204,31 @@ def train(
     checkpointer: CheckPointLoader = instantiate(cfg.checkpoint, rank=rank)
     if hasattr(checkpointer, "load_checkpoint_path"):
         load_checkpoint_path = checkpointer.load_checkpoint_path
+        # Guard against silently running on the wrong/untrained weights. A RESOLVED
+        # load_checkpoint_path that does not exist is always a mistake: in eval it would
+        # evaluate an untrained model; in training a warm-start would silently fall back to
+        # from-scratch. The usual cause is a wrong experiment-name arch tag
+        # ([Space-Adapt-] for flat/hetero vs [TwoGr-Adapt-] for two-grid) pointing at a
+        # nonexistent dir, which the os.path.exists() check below would otherwise skip.
+        # (Fresh training / auto-resume from nothing => load_checkpoint_path is None => no
+        # raise, so this does not affect from-scratch runs.)
+        if load_checkpoint_path is not None and not os.path.exists(load_checkpoint_path):
+            raise FileNotFoundError(
+                f"load_checkpoint_path does not exist: {load_checkpoint_path!r}. Refusing to "
+                "silently run on untrained / from-scratch weights. Check the experiment-name "
+                "arch tag in the path: [Space-Adapt-] for flat/hetero, [TwoGr-Adapt-] for two-grid."
+            )
+        # In validation_mode there must be SOME checkpoint (path or coalesced); otherwise
+        # we'd evaluate an untrained model with no warning.
+        if cfg.validation_mode:
+            coalesced = cfg.checkpoint.get("coalesced_checkpoint_path", None)
+            have_coalesced = coalesced is not None and os.path.exists(coalesced)
+            if load_checkpoint_path is None and not have_coalesced:
+                raise FileNotFoundError(
+                    "validation_mode=True but no checkpoint specified to load "
+                    "(load_checkpoint_path and coalesced_checkpoint_path are both unset/missing). "
+                    "Refusing to evaluate an untrained model."
+                )
         if load_checkpoint_path is not None and os.path.exists(load_checkpoint_path):
             # Load model and optimizer from checkpoint
             # If this is a finetuning load, just load model weights

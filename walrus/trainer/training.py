@@ -176,6 +176,10 @@ class Trainer:
         start_val_loss: Optional[float] = None,
         epsilon: float = 1e-5,
         validation_epsilon: float = 1e-5,
+        resume_eval: bool = False,
+        rollout_only: bool = False,
+        test_only: bool = False,
+        max_val_batches: Optional[int] = None,
     ):
         """
         Class in charge of the training loop. It performs train, validation and test.
@@ -307,6 +311,17 @@ class Trainer:
         # These starting parameters are just for resuming runs
         self.start_epoch = start_epoch
         self.start_val_loss = start_val_loss
+        # When True, an eval pass skips datasets whose per-dataset raw cache already
+        # exists for (epoch, valid_or_test) and rebuilds them from disk instead of
+        # recomputing. When False (default), eval recomputes and overwrites caches.
+        self.resume_eval = resume_eval
+        # When True, skip the one-step validation pass and run rollout (full-trajectory) eval only.
+        self.rollout_only = rollout_only
+        # When True (validation_mode), skip the valid split and evaluate the test split only.
+        self.test_only = test_only
+        # Hard cap on number of batches evaluated per dataset (applies even to full passes,
+        # e.g. rollout eval in validation_mode). None = no cap.
+        self.max_val_batches = max_val_batches
         # Run logistics
         self.max_epoch = max_epoch
         self.val_frequency = val_frequency
@@ -622,6 +637,107 @@ class Trainer:
         # New losses - B, time_logs - B T
         return new_losses, time_logs
 
+    def _log_one_dataset_eval(
+        self, dset_name, dset_loss_dict, dset_time_logs, valid_or_test, epoch, full
+    ):
+        """Aggregate, persist, and wandb-log a SINGLE dataset's eval results as soon
+        as that dataset finishes its batch loop.
+
+        Makes eval logging incremental/per-dataset: a kill mid-pass keeps the datasets
+        already completed (their .pkl/.npy are on disk) instead of losing the whole
+        pass. Single-rank path only -- distributed runs need a cross-rank gather and
+        fall back to the end-of-pass aggregation in validation_loop.
+
+        wandb uses commit=False so all per-dataset metrics accumulate into ONE step;
+        the existing end-of-pass wandb.log in validate_if_necessary commits them.
+        """
+        aggregated_losses = {}
+        aggregated_time_logs = {}
+        for agg_fn in self.batch_aggregation_fns:
+            for k, v in dset_loss_dict.items():
+                aggregated_losses[f"{valid_or_test}_{k}_{agg_fn.__name__}"] = agg_fn(v)
+            for k, v in dset_time_logs.items():
+                aggregated_time_logs.setdefault(dset_name, {})
+                agged = agg_fn(v, dim=0)
+                if not isinstance(agged, torch.Tensor):
+                    agged = agged.values  # torch tensors wrapped in something else
+                aggregated_time_logs[dset_name][
+                    f"{valid_or_test}_{k}_{agg_fn.__name__}"
+                ] = agged
+        # Persist this dataset's time-curve .npy files immediately
+        if len(aggregated_time_logs) > 0:
+            log_all_time_metrics(
+                aggregated_time_logs,
+                self.viz_folder,
+                f"{epoch}_rank{self.rank}_{valid_or_test}",
+            )
+        # Persist this dataset's aggregated scalar losses to its own .pkl
+        dump_path = os.path.join(
+            self.viz_folder,
+            "loss_dicts",
+            f"{valid_or_test}_loss_dict_epoch{epoch}_rank{self.rank}_{dset_name}.pkl",
+        )
+        os.makedirs(os.path.dirname(dump_path), exist_ok=True)
+        with open(dump_path, "wb") as fh:
+            pickle.dump(aggregated_losses, fh)
+        logger.info(
+            f"[per-dataset] {valid_or_test} {dset_name}: "
+            f"{len(aggregated_losses)} metrics -> {dump_path}"
+        )
+        # Raw per-dataset cache for resume. Stores the UN-aggregated B-sized losses +
+        # B x T time logs (on CPU) so a resumed run can rebuild the exact end-of-pass
+        # aggregate without recomputing this dataset. Written atomically (tmp+rename)
+        # so a crash mid-write can't leave a corrupt cache. Always written (even when
+        # resume_eval is off) so a future resume has data to fall back on.
+        raw_path = self._raweval_cache_path(dset_name, valid_or_test, epoch)
+        payload = {
+            "full": full,  # guards against reusing a short cache for a full pass
+            "loss_dict": {k: v.detach().cpu() for k, v in dset_loss_dict.items()},
+            "time_logs": {k: v.detach().cpu() for k, v in dset_time_logs.items()},
+        }
+        tmp_path = raw_path + ".tmp"
+        with open(tmp_path, "wb") as fh:
+            pickle.dump(payload, fh)
+        os.replace(tmp_path, raw_path)
+        # Accumulate into the current wandb step without committing (final
+        # wandb.log in validate_if_necessary commits everything as one step).
+        if self.wandb_logging:
+            wandb.log(aggregated_losses, commit=False)
+
+    def _raweval_cache_path(self, dset_name, valid_or_test, epoch):
+        """Path of the per-dataset raw eval cache used for resume."""
+        return os.path.join(
+            self.viz_folder,
+            "loss_dicts",
+            f"{valid_or_test}_raweval_epoch{epoch}_rank{self.rank}_{dset_name}.pkl",
+        )
+
+    def _try_load_cached_eval(self, dset_name, valid_or_test, epoch, full):
+        """Load a per-dataset raw eval cache written by a prior run (for resume).
+
+        Returns (loss_dict_slice, time_logs) with CPU tensors, or None if the cache
+        is missing, unreadable, or was written under a different `full` regime (in
+        which case the caller recomputes the dataset).
+        """
+        raw_path = self._raweval_cache_path(dset_name, valid_or_test, epoch)
+        if not os.path.exists(raw_path):
+            return None
+        try:
+            with open(raw_path, "rb") as fh:
+                payload = pickle.load(fh)
+        except Exception as e:  # corrupt/partial cache -> recompute rather than crash
+            logger.warning(
+                f"[resume-eval] could not load cache {raw_path}: {e}; recomputing"
+            )
+            return None
+        if payload.get("full") != full:
+            logger.warning(
+                f"[resume-eval] cache {raw_path} was written with full="
+                f"{payload.get('full')} but this pass needs full={full}; recomputing"
+            )
+            return None
+        return payload["loss_dict"], payload.get("time_logs", {})
+
     @torch.no_grad()
     def validation_loop(
         self,
@@ -678,11 +794,37 @@ class Trainer:
                 )
             else:
                 continue
+            # --- Resume eval: reuse a prior run's results for this dataset ---
+            # If enabled and a raw cache exists for (epoch, valid_or_test, dataset),
+            # rebuild this dataset's contribution from disk and skip recompute.
+            if not self.is_distributed and self.rank == 0 and self.resume_eval:
+                cached = self._try_load_cached_eval(
+                    dset_name, valid_or_test, epoch, full
+                )
+                if cached is not None:
+                    cached_loss, cached_time = cached
+                    rank_loss_dict.update(cached_loss)
+                    if cached_time:
+                        rank_time_logs[dset_name] = cached_time
+                    logger.info(
+                        f"[resume-eval] {valid_or_test} {dset_name}: loaded cache "
+                        f"({len(cached_loss)} keys), skipping recompute"
+                    )
+                    continue
             count = 0
+            # Per-dataset batch cap: short subset for partial passes, plus an optional
+            # hard cap (max_val_batches) that applies even to full passes (e.g. rollout eval).
+            effective_cap = None if full else self.short_validation_length
+            if self.max_val_batches is not None:
+                effective_cap = (
+                    self.max_val_batches
+                    if effective_cap is None
+                    else min(effective_cap, self.max_val_batches)
+                )
             denom = (
                 len(dataloader)
-                if full
-                else min(len(dataloader), self.short_validation_length)
+                if effective_cap is None
+                else min(len(dataloader), effective_cap)
             )
             with torch.autocast(
                 device_type=self.device.type,
@@ -862,8 +1004,9 @@ class Trainer:
                                     y_pred.cpu().numpy(),
                                 )
                                 logger.info(f"Wrote out npy dumps to {dump_path}")
-                    # For most per-"epoch" validations, we only do a configurably short subset
-                    if not full and count >= self.short_validation_length:
+                    # Stop early once we hit the per-dataset batch cap (short subset
+                    # and/or max_val_batches, which applies even on full passes)
+                    if effective_cap is not None and count >= effective_cap:
                         break
                 # Run some last outputs on rank 0 do get a general sense of what's going on
                 if (
@@ -902,6 +1045,23 @@ class Trainer:
                                 )
             if dataset.full_trajectory_mode:
                 rank_time_logs[current_metadata.dataset_name] = dset_time_logs
+            # --- Incremental per-dataset logging (single-rank) ---
+            # Persist + wandb-log this dataset as soon as it finishes so a kill
+            # mid-pass keeps the datasets already completed. Distributed runs use
+            # the end-of-pass aggregation below (needs a cross-rank gather).
+            if not self.is_distributed and self.rank == 0:
+                self._log_one_dataset_eval(
+                    dset_name,
+                    {
+                        k: v
+                        for k, v in rank_loss_dict.items()
+                        if k.startswith(f"{dset_name}/")
+                    },
+                    dset_time_logs,
+                    valid_or_test,
+                    epoch,
+                    full,
+                )
         # If we're distributed, now send all per rank results to rank 0 for aggregation
         if self.is_distributed:
             # Wait for all ranks to finish
@@ -1195,7 +1355,10 @@ class Trainer:
         is_test = valid_or_test == "test"  # Check if test
         val_loss, rollout_val_loss = None, None
         # First do one step checks = frequency, last epoch, or test. Only do full validation on last epoch or test
-        if epoch % self.val_frequency == 0 or epoch >= self.max_epoch or is_test:
+        # When rollout_only is set, skip the one-step validation pass entirely.
+        if not self.rollout_only and (
+            epoch % self.val_frequency == 0 or epoch >= self.max_epoch or is_test
+        ):
             logger.info(
                 f"Epoch {epoch}/{self.max_epoch}: starting {valid_or_test} validation"
             )
@@ -1306,16 +1469,21 @@ class Trainer:
 
     def validate(self):
         """Run validation and test. This is a stand alone path"""
-        val_dataloders = self.datamodule.val_dataloaders(
-            replicas=self.sync_group_size,
-            rank=self.rank_in_sync_group,
-            full=not self.debug_mode,
-        )
-        rollout_val_dataloaders = self.datamodule.rollout_val_dataloaders(
-            replicas=self.sync_group_size,
-            rank=self.rank_in_sync_group,
-            full=not self.debug_mode,
-        )
+        # Run validation on the valid split unless test_only is set.
+        if not self.test_only:
+            val_dataloders = self.datamodule.val_dataloaders(
+                replicas=self.sync_group_size,
+                rank=self.rank_in_sync_group,
+                full=not self.debug_mode,
+            )
+            rollout_val_dataloaders = self.datamodule.rollout_val_dataloaders(
+                replicas=self.sync_group_size,
+                rank=self.rank_in_sync_group,
+                full=not self.debug_mode,
+            )
+            self.validate_if_necessary(
+                self.max_epoch + 1, val_dataloders, rollout_val_dataloaders
+            )
         test_dataloaders = self.datamodule.test_dataloaders(
             replicas=self.sync_group_size,
             rank=self.rank_in_sync_group,
@@ -1326,10 +1494,7 @@ class Trainer:
             rank=self.rank_in_sync_group,
             full=not self.debug_mode,
         )
-        # Run validation and test
-        self.validate_if_necessary(
-            self.max_epoch + 1, val_dataloders, rollout_val_dataloaders
-        )
+        # Run test
         self.validate_if_necessary(
             self.max_epoch + 1,
             test_dataloaders,

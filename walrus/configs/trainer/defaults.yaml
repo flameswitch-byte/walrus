@@ -5,6 +5,15 @@ rollout_val_frequency: 5
 short_validation_length: 20
 max_rollout_steps: 60
 num_time_intervals: 5
+# When True, an eval pass reuses per-dataset caches from a prior interrupted run and
+# skips recomputing those datasets. When False, eval recomputes + overwrites caches.
+resume_eval: False
+# When True, skip the one-step validation pass and run rollout (full-trajectory) eval only.
+rollout_only: False
+# When True (with validation_mode), skip the valid split and evaluate the test split only.
+test_only: False
+# Hard cap on batches evaluated per dataset (applies even to full/rollout passes). null = no cap.
+max_val_batches: null
 enable_amp: False
 loss_fn:
   _target_: the_well.benchmark.metrics.MAE
