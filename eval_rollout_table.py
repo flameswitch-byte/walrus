@@ -50,18 +50,25 @@ MODELS = {
     # "medF@100": "medium_walrus_devserver_amp_gpu_oom",
     # "medTG": "medium_walrus_devserver_amp_gpu_twogrid_oom",
     # "medHR@100": "twogrid_gpu_oom_highres",
-    "lgF@100": "large_walrus_devserver_amp_gpu_oom",
-    "lgHR@100": "large_walrus_devserver_amp_gpu_oom_twogrid_highres_coarse_global",
-    "scSp@100": "medium_walrus_scaled_devserver_amp_gpu_spectral_002_floor",
-    "spec@100": "medium_walrus_devserver_amp_gpu_spectral_002_floor",
+    # "sc21mSp@100": "medium_walrus_scaled_devserver_amp_gpu_spectral_002_floor",
+    # "spec@100": "medium_walrus_devserver_amp_gpu_spectral_002_floor",
     # "hetero@100": "medium_walrus_devserver_hetero",
     # "nostride@100": "medium_walrus_devserver_hetero_nostride",
     # --- pinned-by-id custom pulls (epoch-101 collision fix); comment out if not wanted ---
-    "medF@40": "id:79105vr9",  # medF rollout from the step_40 eval
-    "hetero@40": "id:kmqdzw23",  # hetero rollout from the step_40 eval
+    # "medF@40": "id:79105vr9",  # medF rollout from the step_40 eval
+    # "hetero@40": "id:kmqdzw23",  # hetero rollout from the step_40 eval
     "medF@100": "id:vqthxpeo",  # medF rollout from the step_100 eval
     "medTG@100": "id:hvmmz5j1",  # medTG rollout from the step_100 eval
+    "lgF@100": "id:pvmbwsst",
+    "lgHR@100": "id:kx1ejx35",  # lgHR rollout from the step_100 eval
     "medHR@100": "id:m8ljuj01",  # medHR rollout from the step_100 eval
+    "hetero@100": "id:d9m7h84b",  # hetero rollout from the step_100 eval
+    "nostride@100": "id:5wlyvv8p",  # nostride rollout from the step
+    "specop@100": "id:as74nl73",  # specop rollout from the step_100 eval
+    "hetero_specop_multipole@100": "id:52picxhn",  # hetero_specop_multipole rollout from the step
+    "sc21m@100": "id:97eiqxc0",  # sc21m rollout from the step_100 eval
+    "medF64@100": "id:6ozutb2p",  # flat FullAttention @ 64 tok/axis (resolution-on-flat cut, §14.8)
+    "medFMM_fused@100": "id:byoaoj0b",
 }
 
 # canonical dataset order (short label -> wandb dataset name embedded in the metric key)
