@@ -138,6 +138,27 @@ class TestFMMAttention(unittest.TestCase):
             y.sum().backward()
             assert x.grad is not None and torch.isfinite(x.grad).all()
 
+    def test_fast_parity(self):
+        """FMMAttentionFast (fused SDPA) == FMMAttention (manual joint softmax), weight-for-weight."""
+        from walrus.models.spatial_blocks.fmm_attention_fast import FMMAttentionFast
+        cases = [
+            (dict(), (2, 256, 16, 16, 1), (True, True)),
+            (dict(), (2, 256, 8, 8, 8), (True, True, True)),
+            (dict(global_mop_up=True), (2, 256, 16, 16, 1), (True, True)),
+            (dict(learned_pool=False), (2, 256, 16, 16, 1), (True, True)),
+            (dict(), (2, 256, 16, 16, 1), (True, False)),  # wall on W
+        ]
+        for kw, shape, per in cases:
+            m = FMMAttention(hidden_dim=256, num_heads=8, max_token_grid=64, **kw).eval()
+            mf = FMMAttentionFast(hidden_dim=256, num_heads=8, max_token_grid=64, **kw).eval()
+            miss, unexp = mf.load_state_dict(m.state_dict(), strict=True)
+            assert not miss and not unexp, (miss, unexp)
+            x = torch.randn(*shape)
+            with torch.no_grad():
+                y, _ = m(x, _bcs(per))
+                yf, _ = mf(x, _bcs(per))
+            assert torch.allclose(y, yf, atol=1e-4, rtol=1e-4), (kw, (y - yf).abs().max().item())
+
     def test_max_token_grid_sizing(self):
         """finding 2: pooling ModuleList sized to exactly the levels a grid needs."""
         # 64 grid, far_outer=3, pool_base=2 -> levels p=2,4,8 -> 3
