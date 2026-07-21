@@ -1,0 +1,14 @@
+_partial_: true
+_target_: walrus.models.spatial_blocks.fmm_attention.FMMAttention
+num_heads: 8
+# Near-field exact half-width (leaf + adjacent leaves); pool_base=2 -> 3 tiles cleanly.
+near_radius: 3
+pool_base: 2          # coarsening factor per far level (level ℓ pool = pool_base**ℓ)
+far_inner: 2          # annulus inner radius (coarse cells) — well-separated start
+far_outer: 3          # annulus outer radius (coarse cells)
+max_levels:           # null = auto from grid size
+learned_pool: true    # option B (learned far-field) — default; false = fixed mean pool
+tie_levels: false     # untied per-level pooling (§12.9 default)
+global_mop_up: false  # shared coarsest level for FULL global reach; recommend true for true-3D
+max_token_grid: 64    # size pooling exactly for a grid this big (avoids unused Linears; finding 2)
+mlp_dim:
