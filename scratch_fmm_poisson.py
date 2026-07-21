@@ -18,6 +18,7 @@ import torch.nn as nn
 torch.set_num_threads(8)  # FMM has many small ops; all-core oversubscription thrashes CPU
 
 from walrus.models.spatial_blocks.fmm_attention import FMMAttention
+from walrus.models.spatial_blocks.fmm_attention_fused import FMMAttentionFused
 from walrus.models.spatial_blocks.full_attention import FullAttention
 
 torch.manual_seed(0)
@@ -70,12 +71,16 @@ class Solver(nn.Module):
 
 def mixers():
     common = dict(hidden_dim=C, num_heads=HEADS, mlp_dim=C * 2)
+    fused = dict(**common, near_radius=3, pool_base=2, far_inner=2, far_outer=3,
+                 learned_pool=True, max_token_grid=64)
     return {
         "full": lambda: FullAttention(hidden_dim=C, num_heads=HEADS, mlp_dim=C * 2),
         "fmm": lambda: FMMAttention(**common, near_radius=3, pool_base=2,
                                     far_inner=2, far_outer=3, learned_pool=True),
-        "fmm_mop": lambda: FMMAttention(**common, near_radius=3, pool_base=2, far_inner=2,
-                                        far_outer=3, learned_pool=True, global_mop_up=True),
+        # upgraded (Kang): leaf-aligned near + rank-4 far
+        "fused_leaf_p4": lambda: FMMAttentionFused(**fused, leaf_near=True, pool_rank=4),
+        "fused_leaf_p4_mop": lambda: FMMAttentionFused(**fused, leaf_near=True, pool_rank=4,
+                                                       global_mop_up=True),
         "near": lambda: FMMAttention(**common, near_radius=3, max_levels=0),
     }
 

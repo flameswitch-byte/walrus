@@ -1,0 +1,41 @@
+defaults:
+  - encoder: spacebag_and_vstride_encoder
+  - decoder: vstride_decoder
+  - processor: space_time_split
+  - norm_layer: rmsgroupnorm
+_target_: walrus.models.IsotropicModel
+hidden_dim: 256
+projection_dim: 96
+intermediate_dim: 96
+processor_blocks: 6
+drop_path: 0.05
+groups: 8
+max_d: 3
+causal_in_time: False
+include_d: [2, 3]
+override_dimensionality: 3
+jitter_patches: True
+gradient_checkpointing_freq: 0
+input_field_drop: 0.0
+processor:
+  space_mixing:
+    _partial_: true
+    # Path C — memory-optimal + Kang-upgraded: leaf-aligned near + coarse-score rank-p far.
+    # On CUDA the leaf_near=False path can use NATTEN; leaf_near=True (default) is device-agnostic.
+    _target_: walrus.models.spatial_blocks.fmm_attention_fused.FMMAttentionFused
+    num_heads: 8
+    near_radius: 3          # only used when leaf_near=False
+    pool_base: 2
+    far_inner: 2
+    far_outer: 3
+    learned_pool: true
+    leaf_near: true         # Kang I_0 block-tridiagonal near (exact tiling, no seam)
+    pool_rank: 4            # Kang p=4 / FMMformer multi-kernel: 4 summary vecs per coarse cell
+    global_mop_up: false    # true restores full global reach (recommended for true-3D)
+    max_token_grid: 64
+  time_mixing:
+    _partial_: true
+    _target_: walrus.models.temporal_blocks.axial_time_attention.AxialTimeAttention
+    num_heads: 8
+  _partial_: true
+  _target_: walrus.models.spatiotemporal_blocks.space_time_split.SpaceTimeSplitBlock

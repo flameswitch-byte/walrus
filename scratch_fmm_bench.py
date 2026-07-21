@@ -30,9 +30,12 @@ def bcs_2d():
 def make(kind):
     if kind == "full":
         return FullAttention(hidden_dim=HID, num_heads=HEADS).to(DEV)
-    return FMMAttention(hidden_dim=HID, num_heads=HEADS, near_radius=3, pool_base=2,
-                        far_inner=2, far_outer=3, learned_pool=True,
-                        max_token_grid=64).to(DEV)
+    # "fmm" now = the upgraded Path-C fused block (leaf near + coarse rank-1 far), the real
+    # candidate. Set pool_rank=4 to measure the Kang far-rank cost.
+    from walrus.models.spatial_blocks.fmm_attention_fused import FMMAttentionFused
+    return FMMAttentionFused(hidden_dim=HID, num_heads=HEADS, pool_base=2, far_inner=2,
+                             far_outer=3, learned_pool=True, leaf_near=True, pool_rank=1,
+                             max_token_grid=64).to(DEV)
 
 
 def sync():

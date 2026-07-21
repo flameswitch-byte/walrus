@@ -159,6 +159,75 @@ class TestFMMAttention(unittest.TestCase):
                 yf, _ = mf(x, _bcs(per))
             assert torch.allclose(y, yf, atol=1e-4, rtol=1e-4), (kw, (y - yf).abs().max().item())
 
+    def test_fused_parity_anchor(self):
+        """FMMAttentionFused ANCHOR config (leaf_near=False, pool_rank=1: streaming near +
+        rank-1 coarse far) == base FMMAttention, weight-for-weight."""
+        from walrus.models.spatial_blocks.fmm_attention_fused import FMMAttentionFused
+        cases = [
+            (dict(), (2, 256, 16, 16, 1), (True, True)),
+            (dict(), (2, 256, 8, 8, 8), (True, True, True)),
+            (dict(global_mop_up=True), (2, 256, 16, 16, 1), (True, True)),
+            (dict(), (2, 256, 16, 16, 1), (True, False)),  # wall on W
+        ]
+        for kw, shape, per in cases:
+            m = FMMAttention(hidden_dim=256, num_heads=8, max_token_grid=64, **kw).eval()
+            mu = FMMAttentionFused(hidden_dim=256, num_heads=8, max_token_grid=64,
+                                   leaf_near=False, pool_rank=1, **kw).eval()
+            mu.load_state_dict(m.state_dict(), strict=True)
+            x = torch.randn(*shape)
+            with torch.no_grad():
+                y, _ = m(x, _bcs(per))
+                yu, _ = mu(x, _bcs(per))
+            assert torch.allclose(y, yu, atol=1e-4, rtol=1e-4), (kw, (y - yu).abs().max().item())
+
+    def test_fused_leaf_and_rank(self):
+        """New Kang-style paths (leaf_near, pool_rank>1): forward + grad finite, 2D & 3D."""
+        from walrus.models.spatial_blocks.fmm_attention_fused import FMMAttentionFused
+        cfgs = [
+            dict(leaf_near=True, pool_rank=1),
+            dict(leaf_near=True, pool_rank=4),
+            dict(leaf_near=False, pool_rank=4),
+            dict(leaf_near=True, pool_rank=4, global_mop_up=True),
+        ]
+        for kw in cfgs:
+            for shape, per in (((2, 256, 16, 16, 1), (True, True)),
+                               ((2, 256, 8, 8, 8), (True, True, True))):
+                m = FMMAttentionFused(hidden_dim=256, num_heads=8, max_token_grid=64, **kw)
+                x = torch.randn(*shape, requires_grad=True)
+                y, _ = m(x, _bcs(per))
+                assert y.shape == x.shape and torch.isfinite(y).all(), kw
+                y.sum().backward()
+                assert x.grad is not None and torch.isfinite(x.grad).all(), kw
+
+    def test_fused_leaf_near_logits(self):
+        """The block-tridiagonal near logits match an explicit brute-force reference."""
+        from walrus.models.spatial_blocks.fmm_attention_fused import FMMAttentionFused
+        torch.manual_seed(1)
+        m = FMMAttentionFused(hidden_dim=64, num_heads=4, max_token_grid=64, leaf_near=True)
+        B, he, H, W, c = 1, 4, 8, 8, 16
+        qf = torch.randn(B, he, H, W, 1, c)
+        kf = torch.randn(B, he, H, W, 1, c)
+        vf = torch.randn(B, he, H, W, 1, c)
+        near_logits, mask, _ = m._leaf_near(qf, kf, vf, [True, True, True], (H, W, 1))
+        # brute force: for query (i,j), block=(i//pb, j//pb); it attends fine (a,b) with
+        # block-distance <= 1 (periodic). Check every stored logit hits such a key with q·k.
+        pb = m.pool_base
+        scale = c ** -0.5
+        ref = {}  # (i,j) -> set of scores it should contain
+        for i, j in itertools.product(range(H), range(W)):
+            bi, bj = i // pb, j // pb
+            vals = []
+            for a, b in itertools.product(range(H), range(W)):
+                if (abs((a // pb) - bi) <= 1 or abs((a // pb) - bi) >= (H // pb) - 1) and \
+                   (abs((b // pb) - bj) <= 1 or abs((b // pb) - bj) >= (W // pb) - 1):
+                    vals.append(round(float((qf[0, 0, i, j, 0] * kf[0, 0, a, b, 0]).sum() * scale), 3))
+            ref[(i, j)] = sorted(vals)
+        # the valid logits for each query (sorted) must equal the reference set
+        for i, j in [(0, 0), (3, 5), (7, 7)]:
+            got = near_logits[0, 0, i, j, 0][mask[i, j, 0]]
+            got = sorted(round(float(v), 3) for v in got)
+            assert got == ref[(i, j)], (i, j, len(got), len(ref[(i, j)]))
+
     def test_max_token_grid_sizing(self):
         """finding 2: pooling ModuleList sized to exactly the levels a grid needs."""
         # 64 grid, far_outer=3, pool_base=2 -> levels p=2,4,8 -> 3
