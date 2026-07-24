@@ -156,6 +156,7 @@ class Trainer:
         big_batch_multiplier: int = 1,
         big_batch_before: int = 0,
         clip_gradient: float = 0.0,
+        input_noise_std: float = 0.0,
         loss_multiplier: float = 1.0,
         spectral_loss_weight: float = 0.0,
         spectral_loss_fn: Optional[Callable] = None,
@@ -365,6 +366,10 @@ class Trainer:
         self.big_batch_multiplier = big_batch_multiplier
         self.big_batch_before = big_batch_before
         self.clip_gradient = clip_gradient
+        # Std of white noise added to the RevIN-normalized input during training (0 = off).
+        # In normalized space this is a per-field-std-scaled perturbation emulating rollout
+        # input error. See knowledge_base/walrus_general_addons_pushforward_registers.md.
+        self.input_noise_std = input_noise_std
         self.loss_multiplier = loss_multiplier
         self.minimum_context = minimum_context
         self.validation_full_trajectory_ensemble_size = (
@@ -513,6 +518,22 @@ class Trainer:
             normalized_inputs[0] = self.revin.normalize_stdmean(
                 normalized_inputs[0], normalization_stats
             )
+            # Input-noise augmentation (train only): white noise in normalized space =
+            # per-field-std-scaled perturbation that emulates the model's own rollout input
+            # error, closing the teacher-forced train / autoregressive test gap. Model is
+            # unchanged; gated by trainer.input_noise_std (0 = off).
+            #
+            # Perturb ONLY the dynamic field channels. Constant fields (mask,
+            # speed_of_sound, density, ...) are concatenated AFTER the dynamic ones in
+            # ChannelsFirstWithTimeFormatter.process_input and are re-supplied EXACTLY at
+            # every rollout step, so they carry no test-time input error -- noising them
+            # would add a train/test mismatch, not emulate one. Channel dim is 2
+            # (T B C ...); the dynamic channels are the leading input_fields count.
+            if train and self.input_noise_std > 0.0:
+                n_dynamic = moving_batch["input_fields"].shape[-1]
+                noise = self.input_noise_std * torch.randn_like(normalized_inputs[0])
+                noise[:, :, n_dynamic:] = 0.0  # leave constant/boundary channels untouched
+                normalized_inputs[0] = normalized_inputs[0] + noise
             if train:
                 ensemble_size = 1  # No ensembling during training right now
             else:

@@ -31,6 +31,9 @@ gradient_log_level: 0
 clip_gradient: 5.0
 log_interval: 5
 loss_multiplier: 100.
+# White noise added to RevIN-normalized input during training (0 = off; per-field-std-scaled).
+# Emulates rollout input error. Enable per-run: trainer.input_noise_std=0.05
+input_noise_std: 0.0
 lr_scheduler_per_step: False
 validation_suite:
   - _target_: the_well.benchmark.metrics.VRMSE
