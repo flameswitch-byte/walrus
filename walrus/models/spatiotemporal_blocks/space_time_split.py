@@ -53,7 +53,7 @@ class SpaceTimeSplitBlock(nn.Module):
         self.time_mixing.make_rope_learnable(per_axis)
         self.space_mixing.make_rope_learnable(per_axis)
 
-    def forward(self, x, bcs, coarse=None, coarse_ratio=None, return_att=False):
+    def forward(self, x, bcs, coarse=None, coarse_ratio=None, registers=None, return_att=False):
         # input is t x b x c x h x w
         T, B, C, H, W, D = x.shape
         # Time attention runs on the FINE grid only (coarse is per-frame spatial-global
@@ -72,6 +72,13 @@ class SpaceTimeSplitBlock(nn.Module):
             Tc = coarse.shape[0]
             coarse = rearrange(coarse, "t b c h w d -> (t b) c h w d")
 
+        # Persistent global register tokens (flat-path only; runs alongside FullAttention).
+        # Time attention above ran fine-only, so registers pass through it untouched; here
+        # they join the spatial attention. Flatten time into batch to match space_mixing.
+        has_reg = registers is not None
+        if has_reg:
+            registers = rearrange(registers, "t b k c -> (t b) k c")
+
         if self.gradient_checkpointing:
             # kwargs seem to need to be passed explicitly
             if two_grid:
@@ -84,6 +91,13 @@ class SpaceTimeSplitBlock(nn.Module):
                 x, coarse, s_att = checkpoint(
                     wrapped_spatial, x, bcs, use_reentrant=False
                 )
+            elif has_reg:
+                wrapped_spatial = partial(
+                    self.space_mixing, registers=registers, return_att=return_att
+                )
+                x, registers, s_att = checkpoint(
+                    wrapped_spatial, x, bcs, use_reentrant=False
+                )
             else:
                 wrapped_spatial = partial(self.space_mixing, return_att=return_att)
                 x, s_att = checkpoint(wrapped_spatial, x, bcs, use_reentrant=False)
@@ -93,6 +107,10 @@ class SpaceTimeSplitBlock(nn.Module):
                     x, bcs, coarse=coarse, coarse_ratio=coarse_ratio,
                     return_att=return_att,
                 )
+            elif has_reg:
+                x, registers, s_att = self.space_mixing(
+                    x, bcs, registers=registers, return_att=return_att
+                )
             else:
                 x, s_att = self.space_mixing(
                     x, bcs, return_att=return_att
@@ -100,6 +118,8 @@ class SpaceTimeSplitBlock(nn.Module):
         x = rearrange(x, "(t b) c h w d -> t b c h w d", t=T)
         if two_grid:
             coarse = rearrange(coarse, "(t b) c h w d -> t b c h w d", t=Tc)
+        if has_reg:
+            registers = rearrange(registers, "(t b) k c -> t b k c", t=T)
         # MLP input is channels last - #TODO redefine as 1x1 conv to avoid reshape
         x = self.channel_mixing(
             x
@@ -108,4 +128,6 @@ class SpaceTimeSplitBlock(nn.Module):
         att = t_att + s_att if return_att else []
         if two_grid:
             return x, coarse, att
+        if has_reg:
+            return x, registers, att
         return x, att

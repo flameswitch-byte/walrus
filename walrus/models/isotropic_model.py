@@ -71,6 +71,7 @@ class IsotropicModel(nn.Module):
         ] = 0,  # Temporary due to FSDP resume issue
         dim_key_override: Optional[int] = None,  # Temporary due to FSDP resume issue
         per_axis_tokens: Optional[int] = None,  # resolution lever for deterministic ds
+        num_register_tokens: int = 0,  # persistent global register tokens (0 = off)
         norm_layer: Callable = RMSGroupNorm,
         *args,
         **kwargs,
@@ -89,6 +90,23 @@ class IsotropicModel(nn.Module):
             torch.ones(1)
         )  # for grad checkpointing, see: https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11
         self.hidden_dim = hidden_dim
+        # Persistent global register tokens: K learned vectors carried across all blocks
+        # (and time frames) as a position-free global scratchpad. Only new params in the
+        # feature (K x hidden_dim); the RegisterAttention fork reuses all attn weights.
+        # See knowledge_base/walrus_general_addons_pushforward_registers.md.
+        self.num_register_tokens = num_register_tokens
+        if num_register_tokens == 1:
+            # RegisterAttention norms registers with RMS over the K-register axis; with a
+            # single register that RMS is over one element -> collapses it to sign-only per
+            # channel (magnitude normalized away). Use 0 (off) or >= 2.
+            raise ValueError(
+                "num_register_tokens=1 is degenerate (register norm collapses a lone "
+                "register to sign-only). Use 0 to disable or >= 2 (a handful, e.g. 4-8)."
+            )
+        if num_register_tokens > 0:
+            self.register_tokens = nn.Parameter(
+                1e-3 * torch.randn(num_register_tokens, hidden_dim)
+            )
         if (
             self.override_dimensionality is not None
             and self.override_dimensionality > 0
@@ -377,6 +395,14 @@ class IsotropicModel(nn.Module):
 
         # Process
         all_att_maps = []
+        # Persistent global register tokens (flat path only; not combined with the two-grid
+        # coarse grid). Position-free -> excluded from the periodic roll below and dropped
+        # before the decoder. num_register_tokens=0 -> stays None (byte-identical no-op).
+        registers = None
+        if self.num_register_tokens > 0 and coarse is None:
+            registers = self.register_tokens[None, None].expand(
+                x.shape[0], x.shape[1], -1, -1
+            )
         # Compute a periodic roll
         # Blk inputs are T, B, C, H, W, D
         periodic_dims = []
@@ -421,6 +447,10 @@ class IsotropicModel(nn.Module):
                 x, coarse, att_maps = blk(
                     x, bcs, coarse=coarse, coarse_ratio=coarse_ratio,
                     return_att=return_att,
+                )
+            elif registers is not None:
+                x, registers, att_maps = blk(
+                    x, bcs, registers=registers, return_att=return_att
                 )
             else:
                 x, att_maps = blk(x, bcs, return_att=return_att)

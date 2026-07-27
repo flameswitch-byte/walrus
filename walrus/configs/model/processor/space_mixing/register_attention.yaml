@@ -1,0 +1,12 @@
+_partial_: true
+_target_: walrus.models.spatial_blocks.register_attention.RegisterAttention
+# NOTE: num_heads must divide the model's hidden_dim. This 12 mirrors full_spatial_attention's
+# default (correct for hidden_dim divisible by 12). It is only used if you select this via a
+# GROUP override (model/processor/space_mixing=register_attention); the medium_walrus_registers
+# model config INLINES space_mixing with num_heads=8 (hidden_dim=256), which is what it uses.
+# If overriding onto a model, set num_heads to divide that model's hidden_dim.
+num_heads: 12
+mlp_dim:
+# Persistent global register tokens ride this attention (position-free, no RoPE, no new
+# attention params). Count is set at the model level via model.num_register_tokens > 0;
+# with 0 registers this is byte-identical to full_attention.FullAttention.
