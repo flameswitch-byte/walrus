@@ -1,0 +1,22 @@
+# Toy trainer + PUSHFORWARD (Trainer fork). Inherits `toy` (NOT `defaults`), so all toy
+# settings are preserved; only the trainer class + pushforward horizon change.
+#
+# Pushforward advances the input window (pushforward_steps - 1) steps on the model's OWN
+# predictions (no_grad), then grads on the final step -> trains the model to correct its own
+# rollout drift (targets the snowball / exposure bias). See
+# knowledge_base/walrus_general_addons_pushforward_registers.md.
+#
+# REQUIRES the data to provide >= pushforward_steps future frames:
+#   set data.module_parameters.n_steps_output = pushforward_steps (e.g. +data.module_parameters.n_steps_output=2)
+# Non-causal models only for now (medium_walrus is causal_in_time: False).
+# pushforward_steps: 1 -> identical to base toy Trainer.
+defaults:
+  - toy
+  - _self_
+
+_target_: walrus.trainer.PushforwardTrainer
+pushforward_steps: 2   # K; K-1 no_grad advance steps + 1 graded. Cost ~ (K+2)/3x step time.
+# Linearly ramp effective K from 1 -> pushforward_steps over the first N epochs (teacher-force
+# while early predictions are garbage). 0 = no ramp (use K from epoch 0). ~5-10 is reasonable
+# for toy (max_epoch 100).
+pushforward_warmup_epochs: 5
