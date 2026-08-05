@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Per-dataset ROLLOUT metrics from wandb, across the two-grid-vs-flat comparison runs.
+"""Per-dataset ROLLOUT metrics from wandb, across the walrus rollout-ablation runs.
 
 Companion to eval_vrmse_table.py (one-step `valid` means). Pulls the *rollout_test* metrics
-behind §5.2 / §2.2 of knowledge_base/walrus_twogrid_vs_flat_results.md.
+behind §5.2 / §2.2 of knowledge_base/walrus_rollout_ablations.md.
 
 The agent identity is blocked from api.wandb.ai by the fwdproxy filter, so RUN THIS YOURSELF:
     with-proxy python eval_rollout_table.py                 # latest rollout per run, T=all + growth
@@ -69,6 +69,23 @@ MODELS = {
     "sc21m@100": "id:97eiqxc0",  # sc21m rollout from the step_100 eval
     "medF64@100": "id:6ozutb2p",  # flat FullAttention @ 64 tok/axis (resolution-on-flat cut, §14.8)
     "medFMM_fused@100": "id:byoaoj0b",
+    # --- 2026-07-31 evals. RECIPE NOTES: ---
+    #   lgF_fp32 is FP32 (the plane above is bf16) -> distinct fp32 point; do NOT merge with the bf16
+    #   `lgF@100` (pvmbwsst). This run is max_samples=2000; vs bf16 lgF it's a fp32-vs-bf16 read.
+    #   ⚠ c2iwjvox stacked 3 evals onto ONE resumed id (Option B) -> the later ep50 eval masked the
+    #   ep100 point in cloud history (`@101` falls back to ep50), which is why the ep50 point is pinned
+    #   with an explicit `@50` -- see walrus_eval_video_runbook.md §9.7c.
+    #   RESOLVED for ep100: 0bwam20m is the fresh Option-A re-run (no WANDB_RESUME, one eval on the id),
+    #   so `@101` resolves to the real ep100 checkpoint. The two fp32 points are DIFFERENT RUNS
+    #   (0bwam20m ep100 vs c2iwjvox ep50), not two checkpoints of one training curve.
+    "lgF_fp32@50": "id:c2iwjvox@50",  # Option-B run; `@50` pin required (see note above)
+    "lgF_fp32@100": "id:0bwam20m@101",  # fresh Option-A run -> `@101` is the true ep100 eval
+    #   pf_noise05 / pf_reg8 are bf16 + max_samples=500 -> BUDGET-MATCHED to medF (also 500, verified),
+    #   so vs medF the deltas are clean lever reads (minor: medF warmup=2 vs these warmup=5). Each had
+    #   ONE eval on its id, so `@101` resolves correctly (unlike c2iwjvox).
+    "medF_noise05@100": "id:zcns3t63@101",  # medium flat bf16 + input_noise_std=0.05 (noise-injection lever)
+    "medF_reg8@100": "id:n976ara8@101",  # medium_walrus_registers bf16 (register-tokens lever)
+    "medF_push2@100": "id:zi81amuf@101",
 }
 
 # canonical dataset order (short label -> wandb dataset name embedded in the metric key)
@@ -133,13 +150,26 @@ def collect(run):
             if e is None:
                 continue
             for k in keys:
-                if h.get(k) is not None:
-                    byep[int(e)][k] = h[k]
+                v = h.get(k)
+                if v is not None:
+                    try:
+                        byep[int(e)][k] = float(v)
+                    except (TypeError, ValueError):
+                        pass  # skip non-numeric (e.g. stray string) -> blank cell
     return byep, summary, sum_ep
 
 
-def resolve(byep, summary, sum_ep, pinned):
-    """(snapshot {rawkey:val}, epoch_used). Pinned-by-id => always the run's summary."""
+def resolve(byep, summary, sum_ep, pinned, pin_ep=None):
+    """(snapshot {rawkey:val}, epoch_used). Pinned-by-id => the run's summary, unless an explicit
+    pin_ep (id:<rid>@<epoch>) selects that exact epoch from history (nearest <= if absent)."""
+    if pin_ep is not None:
+        if pin_ep in byep:
+            return byep[pin_ep], pin_ep
+        below = [e for e in byep if e <= pin_ep]
+        if below:
+            e = max(below)
+            return byep[e], e
+        return (summary, sum_ep) if summary else ({}, None)
     if pinned or TARGET is None:
         if summary:
             return summary, sum_ep
@@ -170,16 +200,25 @@ def main():
 
     def fetch(spec):
         if spec.startswith("id:"):
-            rid = spec[3:]
+            body = spec[3:]
+            pin_ep = None
+            if "@" in body:
+                rid, ep = body.rsplit("@", 1)
+                try:
+                    pin_ep = int(ep)
+                except ValueError:
+                    rid = body  # not an epoch suffix; treat whole thing as the id
+            else:
+                rid = body
             try:
-                return api.run(f"{entity}/{PROJECT}/{rid}"), True
+                return api.run(f"{entity}/{PROJECT}/{rid}"), True, pin_ep
             except Exception as e:
                 print(f"# (id:{rid} fetch failed: {str(e)[:60]})")
-                return None, True
+                return None, True, None
         cand = sorted(
             by_name.get(spec, []), key=lambda r: (r.summary.get("epoch") or -1)
         )
-        return (cand[-1] if cand else None), False
+        return (cand[-1] if cand else None), False, None
 
     def full_buckets(snap):
         """The T= bucket edges present for the `full` field (the rollout-time dimension)."""
@@ -196,13 +235,13 @@ def main():
 
     data, used, bkts = {}, {}, {}
     for lbl, spec in MODELS.items():
-        r, pinned = fetch(spec)
+        r, pinned, pin_ep = fetch(spec)
         if not r:
             data[lbl], used[lbl], bkts[lbl] = {}, None, ()
             print(f"# {lbl:9s} NO RUN FOUND for '{spec}'")
             continue
         byep, summary, sum_ep = collect(r)
-        snap, e = resolve(byep, summary, sum_ep, pinned)
+        snap, e = resolve(byep, summary, sum_ep, pinned, pin_ep)
         data[lbl], used[lbl] = snap, e
         bkts[lbl] = full_buckets(snap)
         tag = "" if snap else "  (no rollout on wandb)"
